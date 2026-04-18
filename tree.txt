@@ -1,0 +1,19 @@
+my-index-screener/
+├── frontend/                # Next.js Application
+│   ├── src/
+│   │   ├── app/             # Next.js App Router (Pages, Layout)
+│   │   ├── components/      # shadcn components, Custom Charts, Tables, Navbar, Sidebar
+│   │   ├── lib/             # Firebase config, Zustand store, utility functions
+│   │   └── styles/          # Tailwind globals
+│   ├── package.json
+│   └── tailwind.config.js
+│
+├── backend/                 # FastAPI Application
+│   ├── main.py              # API Routes and Server setup
+│   ├── analytics.py         # Your existing Python functions (calc_cagr, calc_vol, etc.)
+│   ├── data_loader.py       # Fetches Parquet from GitHub into DuckDB/Pandas
+│   └── requirements.txt
+│
+└── data/                    # For GitHub Actions (Optional)
+    ├── fetch_nse_data.py    # Script to pull raw data and convert to Parquet
+    └── nifty_returns.parquet
