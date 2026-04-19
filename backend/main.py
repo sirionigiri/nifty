@@ -6,6 +6,11 @@ import pandas as pd
 import os
 import numpy as np
 
+class MetricsRequest(BaseModel):
+    metric: str
+    periods: List[str]
+    indices: List[str]
+    benchmark: str
 
 
 
@@ -51,9 +56,84 @@ def startup_event():
     DATA['end_date'] = prepared_data['end_date']
     DATA['indices'] = prepared_data['indices']
     
+    val_path = "NIFTY_PE_PB_DivYield.csv"
+    if os.path.exists(val_path):
+        print(f"Loading valuation data from {val_path}...")
+        df_val = pd.read_csv(val_path)
+        df_val['Date'] = pd.to_datetime(df_val['Date'])
+        DATA['valuation'] = df_val
+    else:
+        print(f"WARNING: {val_path} not found.")
+    
     print("Data loaded and processed successfully. Server is ready.")
+    
 
+@app.post("/api/valuation-data")
+def get_valuation_data(request: MetricsRequest):
+    if 'valuation' not in DATA: raise HTTPException(status_code=503)
+    
+    idx_name = request.benchmark 
+    df_full = DATA['valuation']
+    
+    # Filter and sort
+    df = df_full[df_full['Index_Name'].str.strip().str.upper() == idx_name.strip().upper()].sort_values('Date')
+    
+    if df.empty:
+        return {"error": f"No valuation data available for {idx_name}"}
 
+    # Time Window Slicing
+    period = request.periods[0] if request.periods else "5 Yr"
+    sd = get_start_date(period, DATA['end_date'])
+    df_window = df[df['Date'] >= sd]
+
+    if df_window.empty:
+        return {"error": f"Insufficient data for {idx_name} in {period} window"}
+
+    # HELPER: Ensure values are JSON compliant (NaN/Inf -> None)
+    def clean_float(val):
+        if val is None or not np.isfinite(val):
+            return None
+        return round(float(val), 2)
+
+    def get_series_and_stats(column_name):
+        series_full = df[column_name].dropna()
+        series_window = df_window[column_name]
+        
+        if series_full.empty:
+            return None
+
+        median = series_full.median()
+        std = series_full.std()
+
+        # Handle case where std might be NaN (only one data point)
+        if not np.isfinite(std): std = 0
+
+        return {
+            "values": [clean_float(v) for v in series_window.tolist()],
+            "stats": {
+                "median": clean_float(median),
+                "upper4": clean_float(median + 4*std),
+                "upper3": clean_float(median + 3*std),
+                "upper2": clean_float(median + 2*std),
+                "upper1": clean_float(median + 1*std),
+                "lower1": clean_float(median - 1*std),
+                "lower2": clean_float(median - 2*std),
+            }
+        }
+
+    # Build response
+    pe_data = get_series_and_stats('PE')
+    pb_data = get_series_and_stats('PB')
+    dy_data = get_series_and_stats('Div_Yield')
+
+    return {
+        "dates": df_window['Date'].dt.strftime('%Y-%m-%d').tolist(),
+        "pe": pe_data,
+        "pb": pb_data,
+        "dy": dy_data,
+    }
+    
+    
 
 # --- NEW: Endpoint to provide initial app config ---
 @app.get("/api/config")
@@ -78,8 +158,15 @@ class MetricsRequest(BaseModel):
 def get_calendar_returns():
     if 'yearly' not in DATA: raise HTTPException(status_code=503)
     df = DATA['yearly'].reset_index()
-    return df.replace({np.nan: None}).to_dict(orient='records')
-
+    
+    # Get total data scope
+    start = DATA['rebased'].index.min().strftime('%d %b %Y')
+    end = DATA['rebased'].index.max().strftime('%d %b %Y')
+    
+    return {
+        "data": df.replace({np.nan: None}).to_dict(orient='records'),
+        "scope": f"{start} to {end}"
+    }
 
 
 @app.post("/api/nav-data")
@@ -130,7 +217,6 @@ def get_nav_data(request: MetricsRequest):
     return output
 
 
-# --- Replace get_metrics_table in backend/main.py ---
 
 @app.post("/api/summary")
 def get_summary_metrics(request: MetricsRequest):
@@ -166,8 +252,11 @@ def get_summary_metrics(request: MetricsRequest):
 def get_metrics_table(request: MetricsRequest):
     if 'rebased' not in DATA: raise HTTPException(status_code=503)
 
+    include_roll = False if request.metric == 'mdd' else True
+
     kw = dict(df_rb=DATA['rebased'], df_ret=DATA['returns'], periods=request.periods,
-              cols=request.indices, bench=request.benchmark, end_actual=DATA['end_date'], include_roll3=True)
+              cols=request.indices, bench=request.benchmark, end_actual=DATA['end_date'], 
+              include_roll3=include_roll)
 
     if request.metric == "exc":
         df_cagr = build_table(metric='cagr', **kw)
@@ -186,7 +275,24 @@ def get_metrics_table(request: MetricsRequest):
     
     if df_result.empty: return []
 
+    # --- NEW: Calculate Date Ranges for Metadata ---
+    ed_str = DATA['end_date'].strftime('%d %b %Y')
+    date_ranges = {}
+    for p in df_result.index:
+        if p == "Rolling 3-Yr Avg":
+            yr = DATA['end_date'].year - 1
+            date_ranges[p] = f"Jan {yr-2} - Dec {yr}"
+        else:
+            sd = get_start_date(p, DATA['end_date'])
+            # Standardize YTD start to Jan 1st for clarity
+            sd_show = pd.Timestamp(f"{DATA['end_date'].year}-01-01") if p == "YTD" else sd
+            date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
+
     df_result = df_result.reset_index().rename(columns={'index': 'Period'})
+    
+    # Inject the Range column
+    df_result['Range'] = df_result['Period'].map(date_ranges)
+    
     df_result = df_result.replace({np.nan: None, np.inf: None, -np.inf: None})
     return df_result.to_dict(orient='records')
 
@@ -194,22 +300,45 @@ def get_metrics_table(request: MetricsRequest):
 
 @app.post("/api/scatter-data")
 def get_scatter_data(request: MetricsRequest):
-    """Powers the Risk vs Return Scatter Plot"""
-    # Use your build_table logic to get CAGR and Vol for the requested indices
-    # request.periods[0] will be the active period (e.g. "5 Yr")
-    period = request.periods[0]
+    """Robust Risk vs Return data provider"""
+    if 'rebased' not in DATA: return []
     
-    cagrs = calc_cagr(DATA['rebased'], get_start_date(period, DATA['end_date']), DATA['end_date'], request.indices)
-    vols = calc_vol(DATA['returns'], get_start_date(period, DATA['end_date']), DATA['end_date'], request.indices)
+    # 1. Determine time window
+    period = request.periods[0] if request.periods else "5 Yr"
+    sd = get_start_date(period, DATA['end_date'])
+    ed = DATA['end_date']
+    
+    # 2. Run calculations
+    # Note: We filter indices here to ensure they exist in the dataframe columns
+    valid_indices = [idx for idx in request.indices if idx in DATA['rebased'].columns]
+    if not valid_indices: return []
+
+    cagrs = calc_cagr(DATA['rebased'], sd, ed, valid_indices)
+    vols = calc_vol(DATA['returns'], sd, ed, valid_indices)
     
     output = []
-    for idx in request.indices:
-        output.append({
-            "index": idx,
-            "return": cagrs[idx],
-            "risk": vols[idx]
-        })
+    for idx in valid_indices:
+        # Extract values
+        r = cagrs.get(idx)
+        v = vols.get(idx)
+
+        # 3. THE CRITICAL FIX: 
+        # Check if the value is a "Finite" number (Not NaN, Not Inf, Not -Inf)
+        # We use pd.isna and np.isfinite for maximum safety
+        if r is not None and v is not None:
+            if np.isfinite(r) and np.isfinite(v):
+                output.append({
+                    "index": idx,
+                    "return": round(float(r), 2),
+                    "risk": round(float(v), 2)
+                })
+            else:
+                # Log or print skipped indices for debugging
+                print(f"Skipping {idx}: Non-finite values (CAGR: {r}, Vol: {v})")
+        
     return output
+
+
 
 @app.post("/api/rankings")
 def get_calendar_rankings(request: MetricsRequest):

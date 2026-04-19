@@ -6,9 +6,19 @@ import { useStore } from "@/store/useStore"
 import { DataTable } from "@/components/DataTable"
 import { getCategoricalColor } from "@/lib/colors"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Download } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { exportToExcel } from "@/lib/export"
 
 export function RankingsTable() {
   const { selectedIndices, benchmark } = useStore()
+
+
+  const handleDownload = () => {
+    if (!data) return;
+    exportToExcel(data, "Calendar_Year_Rankings");
+  }
+
 
   const { data, isLoading } = useQuery({
     queryKey: ["rankings", selectedIndices],
@@ -86,6 +96,15 @@ export function RankingsTable() {
             Calendar Year Rankings (Relative)
         </h3>
       </div>
+
+      <Button 
+          variant="outline" 
+          size="sm" 
+          onClick={handleDownload}
+          className="h-8 text-[10px] font-bold uppercase tracking-widest border-slate-200 dark:border-slate-800"
+        >
+          <Download className="w-3 h-3 mr-2" /> Excel
+        </Button>
 
       <div className="screener-table bg-white dark:bg-slate-900/40 rounded-xl border border-slate-200 dark:border-slate-800 p-2 shadow-sm overflow-x-auto">
         <DataTable columns={columns} data={data} />

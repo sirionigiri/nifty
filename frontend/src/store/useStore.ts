@@ -1,17 +1,20 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
+export type CategoryMap = Record<string, string[]>;
+
 interface FilterState {
   selectedIndices: string[];
   benchmark: string;
   periods: string[];
   toggleIndex: (index: string) => void;
+  // NEW: Bulk update function
+  setSelectedIndices: (indices: string[]) => void;
   setBenchmark: (benchmark: string) => void;
   selectAll: (indices: string[]) => void;
   deselectAll: () => void;
 }
 
-// Using 'persist' middleware so your checkboxes survive a refresh automatically
 export const useStore = create<FilterState>()(
   persist(
     (set) => ({
@@ -24,10 +27,16 @@ export const useStore = create<FilterState>()(
           ? state.selectedIndices.filter((i) => i !== index)
           : [...state.selectedIndices, index],
       })),
+
+      // FIX: Implementation of bulk selection
+      setSelectedIndices: (indices) => set({ selectedIndices: indices }),
+
       setBenchmark: (benchmark) => set({ benchmark }),
+      
       selectAll: (indices) => set({ selectedIndices: indices }),
+      
       deselectAll: () => set({ selectedIndices: [] }),
     }),
-    { name: 'nse-screener-storage' } // unique name for localStorage
+    { name: 'nse-screener-storage' }
   )
 )

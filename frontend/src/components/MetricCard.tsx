@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { useStore } from "@/store/useStore"
 import { Card, CardContent } from "@/components/ui/card"
+import { LoadingSpinner } from "@/components/ui/LoadingSpinner"
 
 export function SummaryCards() {
   const { benchmark, selectedIndices } = useStore()
@@ -27,6 +28,8 @@ export function SummaryCards() {
     { title: `Indices Selected`, value: data?.count, sub: `currently analyzing`, color: "text-blue-600" },
   ]
 
+
+  
   return (
     <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
       {cards.map((c, i) => (
