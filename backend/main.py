@@ -5,6 +5,15 @@ from typing import List
 import pandas as pd
 import os
 import numpy as np
+import duckdb
+import httpx
+import pandas as pd
+from analytics import load_and_prepare
+
+
+URL_RETURNS = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/nifty_data.parquet"
+URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/valuation_data.parquet"
+
 
 class MetricsRequest(BaseModel):
     metric: str
@@ -33,40 +42,34 @@ DATA = {}
 
 # --- NEW: Load data on application startup ---
 @app.on_event("startup")
-def startup_event():
-    """
-    This function runs ONCE when the `uvicorn` server starts.
-    It loads the CSV from disk and prepares all the data.
-    """
-    csv_path = "NIFTY_total_returns.csv" # Assumes the CSV is in the same directory
-    if not os.path.exists(csv_path):
-        print(f"FATAL ERROR: {csv_path} not found. Server cannot start without data.")
-        return # Or raise an exception
+async def startup_event():
+    async with httpx.AsyncClient() as client:
+        try:
+            # Load Returns Data
+            print("Fetching Returns Data from GitHub...")
+            res1 = await client.get(URL_RETURNS)
+            # DuckDB reads the parquet bytes directly into a Pandas DF
+            df_returns = duckdb.query("SELECT * FROM read_parquet(?)", params=[res1.content]).to_df()
+            prepared = load_and_prepare(df_returns)
+            
+            DATA['rebased'] = prepared['rebased']
+            DATA['returns'] = prepared['returns']
+            DATA['yearly']  = prepared['yearly']
+            DATA['end_date'] = prepared['end_date']
+            DATA['indices'] = prepared['indices']
 
-    print(f"Loading data from {csv_path}...")
-    with open(csv_path, "rb") as f:
-        file_bytes = f.read()
-    
-    prepared_data = load_and_prepare(file_bytes)
-    
-    # Store the processed dataframes globally in our DATA dictionary
-    DATA['rebased'] = prepared_data['rebased']
-    DATA['returns'] = prepared_data['returns']
-    DATA['yearly']  = prepared_data['yearly']
-    DATA['end_date'] = prepared_data['end_date']
-    DATA['indices'] = prepared_data['indices']
-    
-    val_path = "NIFTY_PE_PB_DivYield.csv"
-    if os.path.exists(val_path):
-        print(f"Loading valuation data from {val_path}...")
-        df_val = pd.read_csv(val_path)
-        df_val['Date'] = pd.to_datetime(df_val['Date'])
-        DATA['valuation'] = df_val
-    else:
-        print(f"WARNING: {val_path} not found.")
-    
-    print("Data loaded and processed successfully. Server is ready.")
-    
+            # Load Valuation Data
+            print("Fetching Valuation Data from GitHub...")
+            res2 = await client.get(URL_VALUATION)
+            df_val = duckdb.query("SELECT * FROM read_parquet(?)", params=[res2.content]).to_df()
+            df_val['Date'] = pd.to_datetime(df_val['Date'])
+            DATA['valuation'] = df_val
+            
+            print("Backend Ready: All data loaded into RAM.")
+        except Exception as e:
+            print(f"Startup Failure: {e}")
+            
+            
 
 @app.post("/api/valuation-data")
 def get_valuation_data(request: MetricsRequest):

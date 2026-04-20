@@ -41,12 +41,11 @@ PRESET_PERIODS = ["Last Week", "Last Month", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 
 ROLL3_LABEL = "Rolling 3-Yr Avg"
 
 # ── Analytics helpers ─────────────────────────────────────────────────────
-def load_and_prepare(file_bytes: bytes) -> dict:
+def load_and_prepare(df_raw: pd.DataFrame) -> dict:
     """
     Loads raw CSV bytes, processes it, and returns a dictionary of key dataframes.
     This is the main data ingestion and preparation function.
     """
-    df_raw = pd.read_csv(io.BytesIO(file_bytes))
     df_raw['Date'] = pd.to_datetime(df_raw['Date'])
     df_raw = df_raw.sort_values(['Index_Name', 'Date'])
     
