@@ -63,7 +63,7 @@ function DashboardContent() {
           </div>
           <div className="flex items-center gap-4">
             <ThemeToggle />
-            <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-bold text-white shadow-md">US</div>
+            <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-bold text-white shadow-md">SU</div>
           </div>
         </header>
 

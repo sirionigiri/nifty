@@ -1,0 +1,34 @@
+name: NSE Data Daily Sync
+
+on:
+  schedule:
+    - cron: '30 23 * * *' # 5:00 AM IST / 11:30 PM UTC
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  update_parquet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: |
+          pip install pandas pyarrow requests fastparquet
+
+      - name: Run Scraper
+        run: python data/nifty_scraper.py
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name 'Screener Bot'
+          git config --global user.email 'bot@srijan.me'
+          git add data/nifty_data.parquet
+          # Only commit if the file actually changed
+          git commit -m "Auto-update: NIFTY Data $(date)" || echo "No changes to commit"
+          git push
