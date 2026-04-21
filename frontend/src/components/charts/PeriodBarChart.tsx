@@ -22,8 +22,10 @@ export function PeriodBarChart({ data, colorMode = "conditional", zoomEnabled = 
   });
 
   const yAxisConfig = useMemo(() => {
-    const minVal = yValues.length > 0 ? Math.min(...yValues.filter(v => typeof v === 'number')) : 0;
-    const maxVal = yValues.length > 0 ? Math.max(...yValues.filter(v => typeof v === 'number')) : 0;
+    // FIX: Added (v: any) to the filter functions to satisfy TypeScript
+    const numericValues = yValues.filter((v: any) => typeof v === 'number');
+    const minVal = numericValues.length > 0 ? Math.min(...numericValues) : 0;
+    const maxVal = numericValues.length > 0 ? Math.max(...numericValues) : 0;
 
     return {
       range: minVal >= 0 ? [0, maxVal * 1.15] : undefined,
