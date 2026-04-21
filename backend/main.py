@@ -55,6 +55,33 @@ class CacheControlMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(CacheControlMiddleware)
 
+
+
+import time
+import logging
+
+# 1. Setup basic logging to see it in Cloud Run logs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 2. Add this Middleware right after app = FastAPI()
+@app.middleware("http")
+async def add_process_time_header(request, call_next):
+    start_time = time.perf_counter()
+    
+    # Log that a request is starting
+    logger.info(f"🚀 INCOMING: {request.method} {request.url.path}")
+    
+    response = await call_next(request)
+    
+    process_time = time.perf_counter() - start_time
+    logger.info(f"COMPLETED: {request.url.path} in {process_time:.4f}s")
+    
+    # Add the timing to the browser headers so you can see it in 'Inspect Element'
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
+
+
 # This dictionary will hold your dataframes in memory
 DATA = {}
 
@@ -274,6 +301,7 @@ def get_summary_metrics(request: MetricsRequest):
 
 @app.post("/api/metrics")
 def get_metrics_table(request: MetricsRequest):
+    logger.info(f"Calculating {request.metric} for {len(request.indices)} indices...")
     if 'rebased' not in DATA: raise HTTPException(status_code=503)
 
     include_roll = False if request.metric == 'mdd' else True
@@ -297,7 +325,9 @@ def get_metrics_table(request: MetricsRequest):
     else:
         df_result = build_table(metric=request.metric, **kw)
     
-    if df_result.empty: return []
+    if df_result.empty: 
+        logger.warning(f"EMPTY RESULT: No data found for {request.metric}")
+        return []
 
     # --- NEW: Calculate Date Ranges for Metadata ---
     ed_str = DATA['end_date'].strftime('%d %b %Y')
@@ -318,6 +348,7 @@ def get_metrics_table(request: MetricsRequest):
     df_result['Range'] = df_result['Period'].map(date_ranges)
     
     df_result = df_result.replace({np.nan: None, np.inf: None, -np.inf: None})
+    logger.info(f"Returning {len(df_result)} rows of data.")
     return df_result.to_dict(orient='records')
 
 
