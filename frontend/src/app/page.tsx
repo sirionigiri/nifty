@@ -1,7 +1,7 @@
 "use client"
 
-import { Suspense } from "react"
-import { useSearchParams, useRouter, usePathname } from "next/navigation"
+import { Suspense, useCallback } from "react"
+import { useSearchParams } from "next/navigation"
 import { motion, AnimatePresence } from "framer-motion"
 
 import { Sidebar } from "@/components/Sidebar"
@@ -20,47 +20,38 @@ import { NavView } from "@/components/views/NavView"
 import { RiskReturnChart } from "@/components/charts/RiskReturnChart"
 import { ValuationView } from "@/components/views/ValuationView"
 
-// Separate component for the tab content to keep the animation logic clean
-const TabContentWrapper = ({ children, value, activeTab }: { children: React.ReactNode, value: string, activeTab: string }) => {
-  return (
-    <TabsContent value={value} className="m-0 focus-visible:outline-none">
-      <AnimatePresence mode="wait">
-        {activeTab === value && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
-          >
-            {children}
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </TabsContent>
-  );
-};
+const TabTransition = ({ children }: { children: React.ReactNode }) => (
+  <motion.div
+    initial={{ opacity: 0, y: 10 }}
+    animate={{ opacity: 1, y: 0 }}
+    exit={{ opacity: 0, y: -10 }}
+    transition={{ duration: 0.2, ease: "easeOut" }}
+  >
+    {children}
+  </motion.div>
+)
 
 function DashboardContent() {
   const searchParams = useSearchParams()
-  const pathname = usePathname()
-  const { replace } = useRouter()
-
   const activeTab = searchParams.get("tab") || "performance"
 
-  const handleTabChange = (value: string) => {
+  // We use a stable callback and Native History API to avoid Next.js Router loops
+  const handleTabChange = useCallback((value: string) => {
     const params = new URLSearchParams(window.location.search)
     params.set("tab", value)
-    // scroll: false prevents the jump to top
-    replace(`${pathname}?${params.toString()}`, { scroll: false })
-  }
+    
+    // This updates the URL without triggering a full Next.js page data fetch
+    window.history.replaceState(null, '', `?${params.toString()}`)
+    
+    // We manually dispatch a popstate event so other components know the URL changed
+    window.dispatchEvent(new Event('popstate'))
+  }, [])
 
   return (
     <div className="flex h-screen overflow-hidden bg-white dark:bg-[#020203]">
       <Sidebar />
 
       <div className="flex-1 flex flex-col h-screen overflow-hidden bg-slate-50/50 dark:bg-black/20">
-        
-        {/* Navbar */}
         <header className="h-16 border-b border-border flex items-center justify-between px-8 bg-white/80 dark:bg-[#09090b]/80 backdrop-blur z-10 shrink-0">
           <div className="flex items-center gap-4">
             <span className="text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-widest flex items-center gap-1.5">
@@ -72,16 +63,11 @@ function DashboardContent() {
           </div>
           <div className="flex items-center gap-4">
             <ThemeToggle />
-            <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-bold text-white shadow-md">
-              US
-            </div>
+            <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center text-[10px] font-bold text-white shadow-md">US</div>
           </div>
         </header>
 
-        <main 
-          className="flex-1 overflow-y-scroll scroll-smooth" 
-          style={{ scrollbarGutter: 'stable' }}
-        >
+        <main className="flex-1 overflow-y-scroll scroll-smooth" style={{ scrollbarGutter: 'stable' }}>
           <div className="max-w-[1600px] mx-auto p-8 space-y-10">
             
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }}>
@@ -103,37 +89,57 @@ function DashboardContent() {
                   <TabsTrigger
                     key={tab.id}
                     value={tab.id}
-                    className="rounded-lg px-4 py-2 text-[11px] font-bold uppercase transition-all
-                               data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 
-                               data-[state=active]:text-blue-600 dark:data-[state=active]:text-blue-400
-                               data-[state=active]:shadow-sm border border-transparent"
+                    // Force type="button" to prevent form submission/refresh
+                    type="button"
+                    className="rounded-lg px-4 py-2 text-[11px] font-bold uppercase transition-all data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 data-[state=active]:text-blue-600 dark:data-[state=active]:text-blue-400 data-[state=active]:shadow-sm"
                   >
                     {tab.label}
                   </TabsTrigger>
                 ))}
               </TabsList>
 
-              {/* 
-                  FIX: We use TabsContent for each view. 
-                  This ensures views are kept in memory and not re-fetched every click.
-              */}
               <div className="min-h-[800px]">
-                <TabContentWrapper value="performance" activeTab={activeTab}><PerformanceView /></TabContentWrapper>
-                <TabContentWrapper value="risk" activeTab={activeTab}><RiskMetricsView /></TabContentWrapper>
-                <TabContentWrapper value="risk-adjusted" activeTab={activeTab}><RiskAdjustedView /></TabContentWrapper>
-                <TabContentWrapper value="vs-bench" activeTab={activeTab}><VsBenchmarkView /></TabContentWrapper>
-                <TabContentWrapper value="calendar" activeTab={activeTab}><CalendarView /></TabContentWrapper>
-                <TabContentWrapper value="nav" activeTab={activeTab}><NavView /></TabContentWrapper>
-                <TabContentWrapper value="valuation" activeTab={activeTab}><ValuationView /></TabContentWrapper>
-                
+                {/* 
+                  We keep all TabsContent tags present. 
+                  TabsContent handles the 'display: none' logic internally 
+                  which is much faster and prevents re-loading.
+                */}
+                <TabsContent value="performance" className="m-0 outline-none">
+                  <TabTransition><PerformanceView /></TabTransition>
+                </TabsContent>
+
+                <TabsContent value="risk" className="m-0 outline-none">
+                  <TabTransition><RiskMetricsView /></TabTransition>
+                </TabsContent>
+
+                <TabsContent value="risk-adjusted" className="m-0 outline-none">
+                  <TabTransition><RiskAdjustedView /></TabTransition>
+                </TabsContent>
+
+                <TabsContent value="vs-bench" className="m-0 outline-none">
+                  <TabTransition><VsBenchmarkView /></TabTransition>
+                </TabsContent>
+
+                <TabsContent value="valuation" className="m-0 outline-none">
+                  <TabTransition><ValuationView /></TabTransition>
+                </TabsContent>
+
+                <TabsContent value="calendar" className="m-0 outline-none">
+                  <TabTransition><CalendarView /></TabTransition>
+                </TabsContent>
+
+                <TabsContent value="nav" className="m-0 outline-none">
+                  <TabTransition><NavView /></TabTransition>
+                </TabsContent>
+
                 <TabsContent value="scatter" className="m-0 outline-none">
-                  <TabContentWrapper value="scatter" activeTab={activeTab}>
+                  <TabTransition>
                     <div className="bg-white dark:bg-[#09090b] border dark:border-slate-800 rounded-3xl p-8 shadow-sm">
                       <h2 className="text-xl font-bold tracking-tight mb-2 text-slate-900 dark:text-white">Risk vs Return</h2>
                       <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-10">Volatility vs CAGR</p>
                       <RiskReturnChart />
                     </div>
-                  </TabContentWrapper>
+                  </TabTransition>
                 </TabsContent>
               </div>
             </Tabs>
