@@ -96,7 +96,7 @@ export function Sidebar() {
 
   return (
     <aside className="w-72 flex flex-col border-r bg-white dark:bg-[#09090b] h-screen sticky top-0 overflow-hidden shadow-xl z-20">
-      <div className="p-6 border-b shrink-0 bg-white dark:bg-[#09090b]">
+      <div className="p-6 border-b shrink-0 bg-white dark:bg-[#09090b] h-16">
         <h1 className="text-base font-black tracking-tighter text-blue-600 dark:text-blue-400">NSE SCREENER</h1>
       </div>
 
