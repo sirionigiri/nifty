@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query"
 import { useStore } from "@/store/useStore"
 import { BaseChart } from "./BaseChart"
 import { Skeleton } from "@/components/ui/skeleton"
+import { API_BASE_URL } from "@/lib/utils"
 
 // PREMIUM "MUTED" COLORSCALE
 const PROFESSIONAL_SCALE = [
@@ -23,7 +24,7 @@ export function CalendarHeatmap() {
   const { data: response, isLoading } = useQuery({
     queryKey: ["calendar-returns"],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/calendar-returns")
+      const res = await fetch(`${API_BASE_URL}/api/calendar-returns`)
       return res.json()
     }
   })

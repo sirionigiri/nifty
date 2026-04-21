@@ -23,6 +23,12 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
+import { API_BASE_URL } from "@/lib/utils"
+
+
+
+
+
 
 export function ValuationView() {
   const { selectedIndices, benchmark } = useStore();
@@ -43,7 +49,7 @@ export function ValuationView() {
   const { data, isLoading } = useQuery({
     queryKey: ["valuation", activeIndex, activeWindow],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/valuation-data", {
+      const res = await fetch(`${API_BASE_URL}/api/valuation-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ benchmark: activeIndex, indices: [], metric: "", periods: [activeWindow] })

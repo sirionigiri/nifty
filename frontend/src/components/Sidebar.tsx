@@ -14,8 +14,11 @@ import { useState, useMemo } from "react"
 import { exportToExcel, exportFullReport } from "@/lib/export"
 import { LoadingSpinner } from "./ui/LoadingSpinner"
 
+import { API_BASE_URL } from "@/lib/utils" // 1. Import it
+
 const fetchConfig = async (): Promise<{ indices: string[], categories: CategoryMap }> => {
-  const res = await fetch("http://localhost:8000/api/config");
+  // 2. Use backticks (`) and the variable
+  const res = await fetch(`${API_BASE_URL}/api/config`); 
   if (!res.ok) throw new Error("Failed to fetch config");
   return res.json();
 }
@@ -68,7 +71,7 @@ export function Sidebar() {
     setIsGenerating(true);
     try {
       const fetchMetric = async (m: string) => {
-        const res = await fetch("http://localhost:8000/api/metrics", {
+        const res = await fetch(`${API_BASE_URL}/api/metrics`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ metric: m, periods, indices: selectedIndices, benchmark })

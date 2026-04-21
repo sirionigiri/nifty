@@ -6,6 +6,8 @@ import { ColumnDef } from "@tanstack/react-table"
 import { DataTable } from "@/components/DataTable"
 import { Skeleton } from "@/components/ui/skeleton"
 import React from "react" // Import React to use React.ReactNode
+import { API_BASE_URL } from "@/lib/utils"
+
 
 // 1. Define a strict type for your data rows
 // This tells TS: "Every row has a string 'Period', and other keys are numbers or null"
@@ -15,7 +17,7 @@ type MetricRow = {
 };
 
 const fetchMetrics = async (filters: any): Promise<MetricRow[]> => {
-  const response = await fetch("http://localhost:8000/api/metrics", {
+  const response = await fetch(`${API_BASE_URL}api/metrics`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(filters),

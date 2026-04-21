@@ -9,6 +9,8 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { exportToExcel } from "@/lib/export"
+import { API_BASE_URL } from "@/lib/utils"
+
 
 export function RankingsTable() {
   const { selectedIndices, benchmark } = useStore()
@@ -23,7 +25,7 @@ export function RankingsTable() {
   const { data, isLoading } = useQuery({
     queryKey: ["rankings", selectedIndices],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/rankings", {
+      const res = await fetch(`${API_BASE_URL}/api/rankings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ indices: selectedIndices, benchmark, metric: "rank", periods: [] })

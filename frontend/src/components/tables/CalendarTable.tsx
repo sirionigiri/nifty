@@ -8,6 +8,9 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { exportToExcel } from "@/lib/export"
+import { API_BASE_URL } from "@/lib/utils"
+
+
 
 // Helper to generate a heatmap-style background color wash for table cells
 const getReturnColorStyle = (val: number | null) => {
@@ -38,7 +41,7 @@ export function CalendarTable() {
   const { data: response, isLoading } = useQuery({
     queryKey: ["calendar-returns"],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/calendar-returns")
+      const res = await fetch(`${API_BASE_URL}/api/calendar-returns`)
       return res.json()
     }
   })

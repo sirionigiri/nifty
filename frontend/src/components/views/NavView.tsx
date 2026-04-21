@@ -8,6 +8,9 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { getCategoricalColor } from "@/lib/colors"
+import { API_BASE_URL } from "@/lib/utils"
+
+
 
 export function NavView() {
   const { selectedIndices, benchmark } = useStore();
@@ -18,7 +21,7 @@ export function NavView() {
   const { data: priceData, isLoading: loadingPrice } = useQuery({
     queryKey: ["navData", "price", selectedIndices, benchmark, activeWindow],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/nav-data", {
+      const res = await fetch(`${API_BASE_URL}/api/nav-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ metric: "nav", periods: [activeWindow], indices: selectedIndices, benchmark })
@@ -31,7 +34,7 @@ export function NavView() {
   const { data: ddData, isLoading: loadingDd } = useQuery({
     queryKey: ["navData", "drawdown", selectedIndices, benchmark, activeWindow],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/nav-data", {
+      const res = await fetch(`${API_BASE_URL}/api/nav-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ metric: "drawdown", periods: [activeWindow], indices: selectedIndices, benchmark })

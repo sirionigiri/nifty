@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query"
 import { useStore } from "@/store/useStore"
 import { BaseChart } from "@/components/charts/BaseChart"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { API_BASE_URL } from "@/lib/utils"
+
 
 export function NavChartReal() {
   const { selectedIndices, benchmark, periods } = useStore();
@@ -10,7 +12,7 @@ export function NavChartReal() {
   const { data, isLoading } = useQuery({
     queryKey: ["navData", selectedIndices, periods[0]],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/nav-data", {
+      const res = await fetch(`${API_BASE_URL}api/nav-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ metric: "nav", periods: [periods[0]], indices: selectedIndices, benchmark })
@@ -22,7 +24,7 @@ export function NavChartReal() {
   const { data: ddData } = useQuery({
     queryKey: ["ddData", selectedIndices, periods[0]],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/nav-data", { // We will add a flag for DD
+      const res = await fetch(`${API_BASE_URL}/api/nav-data`, { // We will add a flag for DD
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ metric: "drawdown", periods: [periods[0]], indices: selectedIndices, benchmark })

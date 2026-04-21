@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query"
 import { useStore } from "@/store/useStore"
 import { Card, CardContent } from "@/components/ui/card"
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner"
+import { API_BASE_URL } from "@/lib/utils" // 1. Import it
 
 export function SummaryCards() {
   const { benchmark, selectedIndices } = useStore()
@@ -11,7 +12,7 @@ export function SummaryCards() {
   const { data } = useQuery({
     queryKey: ["summary", benchmark, selectedIndices.length],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/summary", {
+      const res = await fetch(`${API_BASE_URL}/api/summary`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ benchmark, indices: selectedIndices, metric: "", periods: [] })

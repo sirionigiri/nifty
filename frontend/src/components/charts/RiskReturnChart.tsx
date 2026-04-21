@@ -8,6 +8,8 @@ import { getCategoricalColor } from "@/lib/colors"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Switch } from "@/components/ui/switch"
+import { API_BASE_URL } from "@/lib/utils"
+
 
 export function RiskReturnChart() {
   const { selectedIndices, periods } = useStore()
@@ -17,7 +19,7 @@ export function RiskReturnChart() {
   const { data, isLoading } = useQuery({
     queryKey: ["scatter", selectedIndices, activePeriod],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/scatter-data", {
+      const res = await fetch(`${API_BASE_URL}/api/scatter-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 

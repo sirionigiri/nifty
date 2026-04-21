@@ -31,7 +31,7 @@ app = FastAPI()
 # Allow the Next.js frontend (running on localhost:3000) to communicate
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "https://nse-index-screener.vercel.app" ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

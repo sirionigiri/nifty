@@ -5,6 +5,8 @@ import { useQuery } from "@tanstack/react-query"
 import { useStore } from "@/store/useStore"
 import { BaseChart } from "./BaseChart"
 import { Skeleton } from "@/components/ui/skeleton"
+import { API_BASE_URL } from "@/lib/utils"
+
 
 export function RiskAdjustedHeatmap() {
   const { selectedIndices, benchmark, periods } = useStore()
@@ -12,7 +14,7 @@ export function RiskAdjustedHeatmap() {
   const { data, isLoading } = useQuery({
     queryKey: ["metrics", "te", selectedIndices, benchmark, periods],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/metrics", {
+      const res = await fetch(`${API_BASE_URL}/api/metrics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ metric: "te", periods, indices: selectedIndices, benchmark })

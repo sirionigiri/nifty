@@ -13,6 +13,8 @@ import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { exportToExcel } from "@/lib/export"
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner"
+import { API_BASE_URL } from "@/lib/utils"
+
 
 export function MetricSection({ title, metric, chartLabel, colorMode = "categorical" }: any) {
   const { selectedIndices, benchmark, periods } = useStore();
@@ -28,7 +30,7 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
   const { data, isLoading } = useQuery({
     queryKey: ["metrics", metric, selectedIndices, benchmark, periods],
     queryFn: async () => {
-      const res = await fetch("http://localhost:8000/api/metrics", {
+      const res = await fetch(`${API_BASE_URL}/api/metrics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ metric, periods, indices: selectedIndices, benchmark })
