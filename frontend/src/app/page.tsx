@@ -20,17 +20,25 @@ import { NavView } from "@/components/views/NavView"
 import { RiskReturnChart } from "@/components/charts/RiskReturnChart"
 import { ValuationView } from "@/components/views/ValuationView"
 
-// Smooth, professional transition
-const TabTransition = ({ children }: { children: React.ReactNode }) => (
-  <motion.div
-    initial={{ opacity: 0, x: 5 }}
-    animate={{ opacity: 1, x: 0 }}
-    exit={{ opacity: 0, x: -5 }}
-    transition={{ duration: 0.2, ease: "easeInOut" }}
-  >
-    {children}
-  </motion.div>
-)
+// Separate component for the tab content to keep the animation logic clean
+const TabContentWrapper = ({ children, value, activeTab }: { children: React.ReactNode, value: string, activeTab: string }) => {
+  return (
+    <TabsContent value={value} className="m-0 focus-visible:outline-none">
+      <AnimatePresence mode="wait">
+        {activeTab === value && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+          >
+            {children}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </TabsContent>
+  );
+};
 
 function DashboardContent() {
   const searchParams = useSearchParams()
@@ -40,8 +48,9 @@ function DashboardContent() {
   const activeTab = searchParams.get("tab") || "performance"
 
   const handleTabChange = (value: string) => {
-    const params = new URLSearchParams(searchParams)
+    const params = new URLSearchParams(window.location.search)
     params.set("tab", value)
+    // scroll: false prevents the jump to top
     replace(`${pathname}?${params.toString()}`, { scroll: false })
   }
 
@@ -75,11 +84,7 @@ function DashboardContent() {
         >
           <div className="max-w-[1600px] mx-auto p-8 space-y-10">
             
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: 0.5 }}
-            >
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }}>
               <SummaryCards />
             </motion.div>
 
@@ -95,38 +100,41 @@ function DashboardContent() {
                   { id: "scatter", label: "Risk vs Return" },
                   { id: "nav", label: "NAV Chart" },
                 ].map((tab) => (
-                  <TabsTrigger key={tab.id} value={tab.id} className="...">
+                  <TabsTrigger
+                    key={tab.id}
+                    value={tab.id}
+                    className="rounded-lg px-4 py-2 text-[11px] font-bold uppercase transition-all
+                               data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800 
+                               data-[state=active]:text-blue-600 dark:data-[state=active]:text-blue-400
+                               data-[state=active]:shadow-sm border border-transparent"
+                  >
                     {tab.label}
                   </TabsTrigger>
                 ))}
               </TabsList>
 
-              {/* FIX: AnimatePresence now wraps a SINGLE motion.div that swaps content based on activeTab */}
+              {/* 
+                  FIX: We use TabsContent for each view. 
+                  This ensures views are kept in memory and not re-fetched every click.
+              */}
               <div className="min-h-[800px]">
-                <AnimatePresence mode="wait" initial={false}>
-                  <motion.div
-                    key={activeTab} // This key is critical! It tells Framer to animate when the tab string changes
-                    initial={{ opacity: 0, x: 10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -10 }}
-                    transition={{ duration: 0.2 }}
-                  >
-                    {activeTab === "performance" && <PerformanceView />}
-                    {activeTab === "risk" && <RiskMetricsView />}
-                    {activeTab === "risk-adjusted" && <RiskAdjustedView />}
-                    {activeTab === "vs-bench" && <VsBenchmarkView />}
-                    {activeTab === "valuation" && <ValuationView />}
-                    {activeTab === "calendar" && <CalendarView />}
-                    {activeTab === "nav" && <NavView />}
-                    {activeTab === "scatter" && (
-                      <div className="bg-white dark:bg-[#09090b] border dark:border-slate-800 rounded-3xl p-8 shadow-sm">
-                        <h2 className="text-xl font-bold tracking-tight mb-2">Risk vs Return</h2>
-                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-10">Volatility vs CAGR</p>
-                        <RiskReturnChart />
-                      </div>
-                    )}
-                  </motion.div>
-                </AnimatePresence>
+                <TabContentWrapper value="performance" activeTab={activeTab}><PerformanceView /></TabContentWrapper>
+                <TabContentWrapper value="risk" activeTab={activeTab}><RiskMetricsView /></TabContentWrapper>
+                <TabContentWrapper value="risk-adjusted" activeTab={activeTab}><RiskAdjustedView /></TabContentWrapper>
+                <TabContentWrapper value="vs-bench" activeTab={activeTab}><VsBenchmarkView /></TabContentWrapper>
+                <TabContentWrapper value="calendar" activeTab={activeTab}><CalendarView /></TabContentWrapper>
+                <TabContentWrapper value="nav" activeTab={activeTab}><NavView /></TabContentWrapper>
+                <TabContentWrapper value="valuation" activeTab={activeTab}><ValuationView /></TabContentWrapper>
+                
+                <TabsContent value="scatter" className="m-0 outline-none">
+                  <TabContentWrapper value="scatter" activeTab={activeTab}>
+                    <div className="bg-white dark:bg-[#09090b] border dark:border-slate-800 rounded-3xl p-8 shadow-sm">
+                      <h2 className="text-xl font-bold tracking-tight mb-2 text-slate-900 dark:text-white">Risk vs Return</h2>
+                      <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-10">Volatility vs CAGR</p>
+                      <RiskReturnChart />
+                    </div>
+                  </TabContentWrapper>
+                </TabsContent>
               </div>
             </Tabs>
           </div>
@@ -138,14 +146,7 @@ function DashboardContent() {
 
 export default function Home() {
   return (
-    <Suspense fallback={
-      <div className="h-screen w-screen bg-white dark:bg-[#020203] flex flex-col items-center justify-center gap-10">
-        <LoadingSpinner />
-        <p className="text-[10px] uppercase tracking-[0.3em] font-black text-slate-400 animate-pulse">
-            Booting Analytical Engine
-        </p>
-      </div>
-    }>
+    <Suspense fallback={null}>
       <DashboardContent />
     </Suspense>
   )

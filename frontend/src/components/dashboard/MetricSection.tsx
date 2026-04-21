@@ -38,6 +38,7 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
       return res.json();
     },
     enabled: selectedIndices.length > 0,
+    placeholderData: (previousData) => previousData, 
   });
 
   // --- SAFETY LAYER: Ensure rows is ALWAYS an array ---
@@ -70,14 +71,13 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
       .filter(d => d.value !== null && d.value !== undefined);
   }, [rows, activePeriod]);
 
-  if (isLoading) {
-    return (
-      <div className="w-full py-20 border-b border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center gap-6">
-        <LoadingSpinner />
-        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-center">Calculating {title}...</p>
-      </div>
-    );
-  }
+  if (isLoading && !data) {
+  return (
+    <div className="w-full py-20 flex flex-col items-center justify-center gap-4">
+      <LoadingSpinner />
+    </div>
+  );
+}
 
   if (isError || rows.length === 0) {
     return (
