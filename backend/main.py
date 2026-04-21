@@ -9,7 +9,7 @@ import duckdb
 import httpx
 import pandas as pd
 from analytics import load_and_prepare
-
+import io 
 
 URL_RETURNS = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/nifty_data.parquet"
 URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/valuation_data.parquet"
@@ -45,25 +45,28 @@ DATA = {}
 async def startup_event():
     async with httpx.AsyncClient() as client:
         try:
-            # Load Returns Data
+            # 1. Load Returns Data
             print("Fetching Returns Data from GitHub...")
             res1 = await client.get(URL_RETURNS)
-            # DuckDB reads the parquet bytes directly into a Pandas DF
-            df_returns = duckdb.query("SELECT * FROM read_parquet(?)", params=[res1.content]).to_df()
+            if res1.status_code != 200: raise Exception("Returns file not found on GitHub")
+            
+            # Use io.BytesIO to turn binary content into a "file-like" object for Pandas
+            df_returns = pd.read_parquet(io.BytesIO(res1.content))
             prepared = load_and_prepare(df_returns)
             
             DATA['rebased'] = prepared['rebased']
             DATA['returns'] = prepared['returns']
             DATA['yearly']  = prepared['yearly']
-            DATA['end_date'] = prepared['end_date']
+            DATA['end_date'] = prepared['end_date'] if 'end_date' in prepared else prepared['rebased'].index.max()
             DATA['indices'] = prepared['indices']
 
-            # Load Valuation Data
+            # 2. Load Valuation Data
             print("Fetching Valuation Data from GitHub...")
             res2 = await client.get(URL_VALUATION)
-            df_val = duckdb.query("SELECT * FROM read_parquet(?)", params=[res2.content]).to_df()
-            df_val['Date'] = pd.to_datetime(df_val['Date'])
-            DATA['valuation'] = df_val
+            if res2.status_code == 200:
+                df_val = pd.read_parquet(io.BytesIO(res2.content))
+                df_val['Date'] = pd.to_datetime(df_val['Date'])
+                DATA['valuation'] = df_val
             
             print("Backend Ready: All data loaded into RAM.")
         except Exception as e:
