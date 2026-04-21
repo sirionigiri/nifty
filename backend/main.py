@@ -23,6 +23,7 @@ class MetricsRequest(BaseModel):
 
 
 
+
 # Import YOUR functions directly from your file
 from analytics import get_start_date, load_and_prepare, build_table, CATEGORY_MAP, calc_cagr, calc_vol, calc_mdd, calc_beta
 
@@ -36,6 +37,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class CacheControlMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        
+        # If it's a data-fetching request, tell the browser to cache it for 1 hour
+        # This significantly speeds up repeat visits
+        if request.method == "GET" and "/api/" in request.url.path:
+            response.headers["Cache-Control"] = "public, max-age=3600"
+            
+        return response
+
+app.add_middleware(CacheControlMiddleware)
 
 # This dictionary will hold your dataframes in memory
 DATA = {}

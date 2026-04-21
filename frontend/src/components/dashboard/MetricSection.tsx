@@ -71,10 +71,15 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
       .filter(d => d.value !== null && d.value !== undefined);
   }, [rows, activePeriod]);
 
-  if (isLoading && !data) {
+const isInitialLoading = isLoading && !data;
+
+if (isInitialLoading) {
   return (
-    <div className="w-full py-20 flex flex-col items-center justify-center gap-4">
+    <div className="w-full py-20 flex flex-col items-center justify-center gap-6">
       <LoadingSpinner />
+      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest animate-pulse">
+          Crunching {title}
+      </p>
     </div>
   );
 }

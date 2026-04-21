@@ -10,6 +10,13 @@
     @apply scroll-smooth;
     /* Reserves space for scrollbar to prevent layout shift on tab switch */
     scrollbar-gutter: stable;
+    font-size: 14.4px; 
+    /* Standard for Chrome, Edge, Safari */
+    zoom: 0.9; 
+    
+    /* Firefox doesn't support 'zoom', so we use scale */
+    -moz-transform: scale(0.9);
+    -moz-transform-origin: 0 0;
   }
   
   body {
