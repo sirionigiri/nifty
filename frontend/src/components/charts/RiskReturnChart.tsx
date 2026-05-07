@@ -49,7 +49,7 @@ export function RiskReturnChart() {
         line: { width: 2, color: 'white' },
         opacity: 0.8
     },
-    textfont: { family: 'Geist Sans', size: 10, fontWeight: 'bold' },
+    textfont: { size: 12, fontWeight: 'bold' },
     hovertemplate: 
         "<b>%{text}</b><br>" +
         "Risk (Vol): <b>%{x:.2f}%</b><br>" +
@@ -90,12 +90,12 @@ export function RiskReturnChart() {
           layout={{ 
             hovermode: 'closest',
             xaxis: { 
-                title: { text: "RISK (ANNUALISED VOLATILITY %)", font: { size: 10, family: 'Geist Sans', fontWeight: 'bold' } },
+                title: { text: "RISK (ANNUALISED VOLATILITY %)", font: { size: 12, fontWeight: 'bold' } },
                 gridcolor: '#f1f5f9',
                 zeroline: false
             },
             yaxis: { 
-                title: { text: "RETURN (CAGR %)", font: { size: 10, family: 'Geist Sans', fontWeight: 'bold' } },
+                title: { text: "RETURN (CAGR %)", font: { size: 12, fontWeight: 'bold' } },
                 gridcolor: '#f1f5f9',
                 zeroline: true,
                 zerolinecolor: '#e2e8f0'

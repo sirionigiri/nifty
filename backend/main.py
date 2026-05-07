@@ -298,60 +298,76 @@ def get_summary_metrics(request: MetricsRequest):
 
 
 
-
 @app.post("/api/metrics")
 def get_metrics_table(request: MetricsRequest):
-    logger.info(f"Calculating {request.metric} for {len(request.indices)} indices...")
     if 'rebased' not in DATA: raise HTTPException(status_code=503)
 
-    include_roll = False if request.metric == 'mdd' else True
+    try:
+        # 1. Filter out indices that don't exist in the CSV data
+        valid_indices = [
+            idx for idx in request.indices 
+            if idx in DATA['rebased'].columns and idx in DATA['returns'].columns
+        ]
+        
+        if not valid_indices:
+            return {"data": [], "error": "None of the selected indices exist in data."}
 
-    kw = dict(df_rb=DATA['rebased'], df_ret=DATA['returns'], periods=request.periods,
-              cols=request.indices, bench=request.benchmark, end_actual=DATA['end_date'], 
-              include_roll3=include_roll)
+        # 2. Base kwargs for build_table
+        include_roll = False if request.metric == 'mdd' else True
+        kw = dict(df_rb=DATA['rebased'], df_ret=DATA['returns'], periods=request.periods,
+                  cols=valid_indices, bench=request.benchmark, end_actual=DATA['end_date'], 
+                  include_roll3=include_roll)
 
-    if request.metric == "exc":
-        df_cagr = build_table(metric='cagr', **kw)
-        df_result = df_cagr.sub(df_cagr[request.benchmark], axis=0)
-    elif request.metric == "ra":
-        df_cagr = build_table(metric='cagr', **kw)
-        df_vol = build_table(metric='vol', **kw)
-        df_result = df_cagr / df_vol
-    elif request.metric == "ir":
-        df_cagr = build_table(metric='cagr', **kw)
-        df_exc = df_cagr.sub(df_cagr[request.benchmark], axis=0)
-        df_te = build_table(metric='te', **kw)
-        df_result = df_exc / df_te
-    else:
-        df_result = build_table(metric=request.metric, **kw)
-    
-    if df_result.empty: 
-        logger.warning(f"EMPTY RESULT: No data found for {request.metric}")
-        return []
-
-    # --- NEW: Calculate Date Ranges for Metadata ---
-    ed_str = DATA['end_date'].strftime('%d %b %Y')
-    date_ranges = {}
-    for p in df_result.index:
-        if p == "Rolling 3-Yr Avg":
-            yr = DATA['end_date'].year - 1
-            date_ranges[p] = f"Jan {yr-2} - Dec {yr}"
+        # 3. Perform Calculations
+        if request.metric == "exc":
+            df_cagr = build_table(metric='cagr', **kw)
+            df_result = df_cagr.sub(df_cagr[request.benchmark], axis=0)
+        elif request.metric == "ra":
+            df_cagr = build_table(metric='cagr', **kw)
+            df_vol = build_table(metric='vol', **kw)
+            df_result = df_cagr / df_vol
+        elif request.metric == "ir":
+            df_cagr = build_table(metric='cagr', **kw)
+            df_exc = df_cagr.sub(df_cagr[request.benchmark], axis=0)
+            df_te = build_table(metric='te', **kw)
+            df_result = df_exc / df_te
         else:
-            sd = get_start_date(p, DATA['end_date'])
-            # Standardize YTD start to Jan 1st for clarity
-            sd_show = pd.Timestamp(f"{DATA['end_date'].year}-01-01") if p == "YTD" else sd
-            date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
+            df_result = build_table(metric=request.metric, **kw)
+        
+        if df_result.empty: return {"data": [], "error": "Calculation resulted in empty data"}
 
-    df_result = df_result.reset_index().rename(columns={'index': 'Period'})
-    
-    # Inject the Range column
-    df_result['Range'] = df_result['Period'].map(date_ranges)
-    
-    df_result = df_result.replace({np.nan: None, np.inf: None, -np.inf: None})
-    logger.info(f"Returning {len(df_result)} rows of data.")
-    return df_result.to_dict(orient='records')
+        # --- NEW: CALCULATE DATE RANGES FOR THE 'Range' COLUMN ---
+        ed = DATA['end_date']
+        ed_str = ed.strftime('%d %b %y')
+        date_ranges = {}
+        
+        for p in df_result.index:
+            if p == "Rolling 3-Yr Avg":
+                yr = ed.year - 1
+                date_ranges[p] = f"Jan {yr-2} - Dec {yr}"
+            else:
+                sd = get_start_date(p, ed)
+                # Ensure YTD starts visually from Jan 1st
+                sd_show = pd.Timestamp(f"{ed.year}-01-01") if p == "YTD" else sd
+                date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
 
+        # 4. Standardize response format
+        df_result = df_result.reset_index().rename(columns={'index': 'Period'})
+        
+        # Inject the Range metadata column
+        df_result['Range'] = df_result['Period'].map(date_ranges)
+        
+        # Ensure no JSON-breaking values (NaN/Inf)
+        df_result = df_result.replace({np.nan: None, np.inf: None, -np.inf: None})
+        
+        return {
+            "data": df_result.to_dict(orient='records'),
+            "error": None
+        }
 
+    except Exception as e:
+        print(f"CRITICAL API ERROR: {str(e)}")
+        return {"data": [], "error": f"Internal calculation error: {str(e)}"}
 
 @app.post("/api/scatter-data")
 def get_scatter_data(request: MetricsRequest):

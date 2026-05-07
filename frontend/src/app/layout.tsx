@@ -3,6 +3,8 @@ import { GeistSans } from "geist/font/sans" // This is the premium font we selec
 import "./globals.css"
 import { ThemeProvider } from "@/components/ThemeProvider"
 import { QueryProvider } from "@/components/QueryProvider"
+import { Toaster } from "@/components/ui/sonner"
+
 
 export const metadata: Metadata = {
   title: "NSE Index Screener",
@@ -24,8 +26,11 @@ export default function RootLayout({
           enableSystem={false}
           disableTransitionOnChange
         >
+          
+
           <QueryProvider>
             {children}
+            <Toaster position="top-right" richColors />
           </QueryProvider>
         </ThemeProvider>
 
