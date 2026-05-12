@@ -54,7 +54,11 @@ export function RankingsTable() {
       })
       .map(key => ({
         accessorKey: key,
-        header: key,
+        header: () => (
+          <div className={key === 'Period' ? "text-left pl-3" : "text-center w-full"}>
+            {key}
+          </div>
+        ),
         cell: ({ row }: any) => {
           const val = row.getValue(key);
           if (!val) return <div className="p-2 text-slate-300">—</div>;

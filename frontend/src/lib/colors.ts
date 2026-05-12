@@ -6,7 +6,7 @@ const SPECIFIC_INDEX_COLORS: Record<string, string> = {
   "NIFTY 50": "#2563eb",        // Blue
   "NIFTY NEXT 50": "#0891b2",   // Cyan
   "NIFTY MIDCAP 150": "#7c3aed", // Violet
-  "NIFTY SMALLCAP 250": "#db2777", // Pink
+  "NIFTY SMLCAP 250": "#db2777", // Pink
   "NIFTY MICROCAP250": "#ca8a04", // Gold
 };
 

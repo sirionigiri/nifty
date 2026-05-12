@@ -44,7 +44,7 @@ export const columns: ColumnDef<PerformanceData>[] = [
   },
   {
     accessorKey: "niftySmallcap250",
-    header: () => <div className="text-right">NIFTY SMALLCAP 250</div>,
+    header: () => <div className="text-right">NIFTY SMLCAP 250</div>,
     cell: ({ row }) => <div className="text-right">{formatCell(row.getValue("niftySmallcap250"))}</div>,
   },
 ]

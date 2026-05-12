@@ -134,7 +134,11 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
     .filter(key => key !== 'Range')
     .map(key => ({ 
       accessorKey: key, 
-      header: key, 
+      header: () => (
+          <div className={key === 'Period' ? "text-left pl-3" : "text-center w-full"}>
+            {key}
+          </div>
+        ), 
       cell: ({ row }: any) => {
         const val = row.getValue(key);
         const range = row.original.Range;
@@ -145,12 +149,12 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
           </div>
         );
         const num = val as number | null;
-        if (num === null || typeof num !== 'number') return <div className="p-3 text-right text-slate-400">—</div>;
+        if (num === null || typeof num !== 'number') return <div className="p-3 text-center text-slate-400">—</div>;
         let color = "text-slate-600 dark:text-slate-300";
         if (metric === 'beta') color = num > 1.1 ? "text-red-600" : num < 0.9 ? "text-blue-600" : "text-slate-600";
         else if (metric === 'mdd' || num < 0) color = "text-red-600 font-bold";
         else if (num > 0) color = "text-green-600 font-bold";
-        return <div className={`p-3 text-right font-mono font-medium ${color}`}>{num.toFixed(2)}</div>
+        return <div className={`p-3 text-center font-mono font-medium ${color}`}>{num.toFixed(2)}</div>
       }
     }));
 

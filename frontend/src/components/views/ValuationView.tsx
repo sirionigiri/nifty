@@ -117,7 +117,7 @@ export function ValuationView() {
 
           {/* PERIOD SWITCHER */}
           <div className="space-y-2">
-            <h2 className="text-[10px] font-black uppercase tracking-widest text-slate-400 text-right mr-1">History Window</h2>
+            <h2 className="text-[10px] font-black uppercase tracking-widest text-slate-400 text-center mr-1">History Window</h2>
             <Tabs value={activeWindow} onValueChange={setActiveWindow}>
               <TabsList className="segmented-tabs-list !mb-0">
                 {navPeriods.map(p => (

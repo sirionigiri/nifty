@@ -64,7 +64,11 @@ export function CalendarTable() {
 
     return colsToShow.map(key => ({
       accessorKey: key,
-      header: key,
+      header: () => (
+      <div className={key === 'Period' ? "text-left pl-3" : "text-center w-full"}>
+        {key}
+      </div>
+    ),
       cell: ({ row }: any) => {
         const val = row.getValue(key);
         

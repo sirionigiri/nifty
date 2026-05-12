@@ -66,7 +66,7 @@ export function LivePerformanceView() {
             
             // For all other columns (numerical data), cast as number or null
             return (
-                <div className="text-right">
+                <div className="text-center">
                     {formatScreenerCell(value as number | null)}
                 </div>
             );

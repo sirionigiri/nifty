@@ -38,17 +38,17 @@ export const columns: ColumnDef<VolatilityData>[] = [
   },
   {
     accessorKey: "nifty50",
-    header: () => <div className="text-right p-3">NIFTY 50</div>,
+    header: () => <div className="text-center p-3">NIFTY 50</div>,
     cell: ({ row }) => formatHeatmapCell(row.getValue("nifty50")),
   },
   {
     accessorKey: "niftyNext50",
-    header: () => <div className="text-right p-3">NIFTY NEXT 50</div>,
+    header: () => <div className="text-center p-3">NIFTY NEXT 50</div>,
     cell: ({ row }) => formatHeatmapCell(row.getValue("niftyNext50")),
   },
   {
     accessorKey: "niftyMidcap150",
-    header: () => <div className="text-right p-3">NIFTY MIDCAP 150</div>,
+    header: () => <div className="text-center p-3">NIFTY MIDCAP 150</div>,
     cell: ({ row }) => formatHeatmapCell(row.getValue("niftyMidcap150")),
   },
 ]
