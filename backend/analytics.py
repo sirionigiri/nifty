@@ -37,8 +37,10 @@ CATEGORY_MAP = {
     ],
 }
 
-PRESET_PERIODS = ["Last Week", "Last Month", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "15 Yr", "20 Yr"]
+PRESET_PERIODS = ["Last Week", "Last Month", "3 Month", "6 Month",  "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "15 Yr", "20 Yr"]
 ROLL3_LABEL = "Rolling 3-Yr Avg"
+ABS_PERIODS = ["Last Week", "Last Month", "3 Month", "6 Month", "YTD"]
+
 
 # ── Analytics helpers ─────────────────────────────────────────────────────
 def load_and_prepare(df_raw: pd.DataFrame) -> dict:
@@ -98,8 +100,10 @@ def _calc_yearly(df):
 
 def get_start_date(label, end_actual, slider_years=None):
     """Calculates the start date for a given period label (e.g., "1 Yr", "YTD")."""
-    if label == "Last Week": return end_actual - pd.Timedelta(days=7)
+    if label == "Last Week":  return end_actual - pd.Timedelta(days=7)
     if label == "Last Month": return end_actual - pd.DateOffset(months=1)
+    if label == "3 Month":    return end_actual - pd.DateOffset(months=3)
+    if label == "6 Month":    return end_actual - pd.DateOffset(months=6)
     if label == "YTD": return pd.Timestamp(f"{end_actual.year}-01-01") - pd.Timedelta(days=1)
     if label == "1 Yr": return end_actual - pd.DateOffset(years=1)
     if label == "3 Yr": return end_actual - pd.DateOffset(years=3)
@@ -112,13 +116,17 @@ def get_start_date(label, end_actual, slider_years=None):
     return end_actual - pd.DateOffset(years=20)
 
 # ── Point-in-time metric calculators ─────────────────────────────────────
-def calc_cagr(df_rb, sd, ed, cols):
+def calc_cagr(df_rb, sd, ed, cols, label=None):
     sv = _get_last(df_rb[cols], sd)
     ev = _get_last(df_rb[cols], ed)
     if sv is None or ev is None: return pd.Series(np.nan, index=cols)
-    yrs = (ev.name - sv.name).days / 365.25
-    if yrs <= 0: return pd.Series(np.nan, index=cols)
-    return ((ev / sv) ** (1/yrs) - 1).mul(100).round(2)
+    if label in ABS_PERIODS:
+        # ABSOLUTE RETURN FORMULA
+        return ((ev / sv) - 1).mul(100).round(2)
+    else:
+        yrs = (ev.name - sv.name).days / 365.25
+        if yrs <= 0: return pd.Series(np.nan, index=cols)
+        return ((ev / sv) ** (1/yrs) - 1).mul(100).round(2)
 
 def calc_vol(df_ret, sd, ed, cols):
     p = df_ret[cols].loc[(df_ret.index > sd) & (df_ret.index <= ed)]

@@ -23,8 +23,13 @@ const fetchConfig = async (): Promise<{ indices: string[], categories: CategoryM
   return res.json();
 }
 
+const PERIOD_MASTER_ORDER = [
+  "Last Week", "Last Month", "3 Month", "6 Month", "YTD", 
+  "1 Yr", "3 Yr", "5 Yr", "10 Yr", "15 Yr", "20 Yr", "Rolling 3-Yr Avg"
+];
+
 export function Sidebar() {
-  const { selectedIndices, setSelectedIndices, benchmark, periods, toggleIndex, setBenchmark, deselectAll } = useStore();
+  const { selectedIndices, setSelectedIndices, benchmark, periods, setPeriods, toggleIndex, setBenchmark, deselectAll } = useStore();
   const [searchQuery, setSearchQuery] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
 
@@ -172,6 +177,32 @@ export function Sidebar() {
                 </AccordionItem>
               ))}
             </Accordion>
+          </div>
+
+          <div className="px-1 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-4">
+            <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Time Periods</h3>
+            <div className="grid grid-cols-2 gap-2">
+              {["Last Week", "Last Month", "3 Month", "6 Month", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "20 Yr", "Rolling 3-Yr Avg"].map(p => (
+                <div key={p} className="flex items-center space-x-2 p-1">
+                  <Checkbox 
+                    id={`p-${p}`}
+                    checked={periods.includes(p)}
+                    onCheckedChange={(checked) => {
+                      const newPeriods = checked 
+                        ? [...periods, p] 
+                        : periods.filter(x => x !== p);
+                        newPeriods.sort((a, b) => 
+                          PERIOD_MASTER_ORDER.indexOf(a) - PERIOD_MASTER_ORDER.indexOf(b)
+                        );
+                      setPeriods(newPeriods);
+                    }}
+                  />
+                  <label htmlFor={`p-${p}`} className="text-[10px] font-bold text-slate-500 uppercase cursor-pointer hover:text-blue-600">
+                    {p}
+                  </label>
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="px-1 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-3 pb-12">

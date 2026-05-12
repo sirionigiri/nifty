@@ -142,12 +142,20 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
       cell: ({ row }: any) => {
         const val = row.getValue(key);
         const range = row.original.Range;
-        if (key === 'Period') return (
-          <div className="p-3 flex flex-col leading-tight">
-            <span className="font-bold text-slate-700 dark:text-slate-200">{val as string}</span>
-            <span className="text-[9px] text-slate-400 font-medium mt-0.5 tabular-nums">{range}</span>
-          </div>
-        );
+        if (key === 'Period') {
+            const isAbs = ["Last Week", "Last Month", "3 Month", "6 Month", "YTD"].includes(val);
+            return (
+              <div className="p-3 flex flex-col leading-tight whitespace-nowrap text-left">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-700 dark:text-slate-200">{val as string}</span>
+                  {isAbs && metric === 'cagr' && (
+                    <span className="text-[8px] bg-slate-100 dark:bg-slate-800 px-1 rounded text-slate-500 font-black">ABS</span>
+                  )}
+                </div>
+                {range && <span className="text-[9px] text-slate-400 font-medium mt-0.5 tabular-nums">{range}</span>}
+              </div>
+            );
+        }
         const num = val as number | null;
         if (num === null || typeof num !== 'number') return <div className="p-3 text-center text-slate-400">—</div>;
         let color = "text-slate-600 dark:text-slate-300";
