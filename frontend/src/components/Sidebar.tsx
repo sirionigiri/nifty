@@ -36,6 +36,7 @@ export function Sidebar() {
   const { data: config, isLoading, error } = useQuery({
     queryKey: ["appConfig"],
     queryFn: fetchConfig,
+    staleTime: 0
   });
 
   // 1. Organize Categories & Dynamic "Others"
@@ -58,6 +59,8 @@ export function Sidebar() {
     });
     return filtered;
   }, [config, searchQuery]);
+
+  
 
   // 2. Category Bulk Toggle Logic
   const handleBulkSet = (indicesInCat: string[], action: 'all' | 'none') => {
@@ -91,7 +94,7 @@ export function Sidebar() {
   const defaultOpenCategories = useMemo(() => {
     if (!organizedCategories) return [];
     return Object.keys(organizedCategories).filter(
-      (key) => key !== "Thematic Indices" && key !== "Others"
+      (key) => key !== "Thematic" && key !== "Sectoral" && key !== "Others" && key !== "Strategy"
     );
   }, [organizedCategories]);
 
