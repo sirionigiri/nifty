@@ -199,7 +199,7 @@ def build_table(df_rb, df_ret, metric, periods, cols, bench,
 
         if not valid_cols: continue
         
-        if metric == 'cagr': rows[lbl] = calc_cagr(df_rb, sd, end_actual, valid_cols)
+        if metric == 'cagr': rows[lbl] = calc_cagr(df_rb, sd, end_actual, valid_cols, label=lbl)
         elif metric == 'vol': rows[lbl] = calc_vol(df_ret, sd, end_actual, valid_cols)
         elif metric == 'mdd': rows[lbl] = calc_mdd(df_rb, sd, end_actual, valid_cols)
         elif metric == 'beta': rows[lbl] = calc_beta(df_ret, sd, end_actual, valid_cols, bench)
