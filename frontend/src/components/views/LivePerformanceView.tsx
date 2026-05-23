@@ -35,15 +35,16 @@ const formatScreenerCell = (value: number | null) => {
 };
 
 export function LivePerformanceView() {
-  const { selectedIndices, benchmark, periods } = useStore();
+  const { selectedIndices, benchmark, periods, referenceDate } = useStore();
 
   const { data, isLoading, error, isFetching } = useQuery({
-    queryKey: ["metrics", "cagr", selectedIndices, benchmark, periods],
+    queryKey: ["metrics", "cagr", selectedIndices, benchmark, periods, referenceDate],
     queryFn: () => fetchMetrics({ 
       metric: "cagr",
       periods: periods,
       indices: selectedIndices,
-      benchmark: benchmark
+      benchmark: benchmark,
+      reference_date: referenceDate
     }),
     enabled: selectedIndices.length > 0,
   });

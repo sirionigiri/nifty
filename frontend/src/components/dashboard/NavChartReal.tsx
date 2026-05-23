@@ -7,27 +7,27 @@ import { API_BASE_URL } from "@/lib/utils"
 
 
 export function NavChartReal() {
-  const { selectedIndices, benchmark, periods } = useStore();
+  const { selectedIndices, benchmark, periods, referenceDate } = useStore();
 
   const { data, isLoading } = useQuery({
-    queryKey: ["navData", selectedIndices, periods[0]],
+    queryKey: ["navData", selectedIndices, periods[0], referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}api/nav-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metric: "nav", periods: [periods[0]], indices: selectedIndices, benchmark })
+        body: JSON.stringify({ metric: "nav", periods: [periods[0]], indices: selectedIndices, benchmark, reference_date: referenceDate })
       });
       return res.json();
     },
   });
 
   const { data: ddData } = useQuery({
-    queryKey: ["ddData", selectedIndices, periods[0]],
+    queryKey: ["ddData", selectedIndices, periods[0], referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/nav-data`, { // We will add a flag for DD
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metric: "drawdown", periods: [periods[0]], indices: selectedIndices, benchmark })
+        body: JSON.stringify({ metric: "drawdown", periods: [periods[0]], indices: selectedIndices, benchmark, reference_date: referenceDate })
       });
       return res.json();
     },

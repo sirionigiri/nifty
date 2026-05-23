@@ -12,12 +12,12 @@ import { API_BASE_URL } from "@/lib/utils"
 
 
 export function RiskReturnChart() {
-  const { selectedIndices, periods } = useStore()
+  const { selectedIndices, periods, referenceDate } = useStore()
   const [activePeriod, setActivePeriod] = useState("5 Yr")
   const [zoomEnabled, setZoomEnabled] = useState(false)
 
   const { data, isLoading } = useQuery({
-    queryKey: ["scatter", selectedIndices, activePeriod],
+    queryKey: ["scatter", selectedIndices, activePeriod, referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/scatter-data`, {
         method: "POST",
@@ -26,7 +26,8 @@ export function RiskReturnChart() {
             metric: "scatter", 
             periods: [activePeriod], 
             indices: selectedIndices, 
-            benchmark: "" 
+            benchmark: "", 
+            reference_date: referenceDate 
         })
       })
       return res.json()

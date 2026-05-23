@@ -13,18 +13,18 @@ import { API_BASE_URL } from "@/lib/utils"
 
 
 export function NavView() {
-  const { selectedIndices, benchmark } = useStore();
+  const { selectedIndices, benchmark, referenceDate } = useStore();
   const [zoomEnabled, setZoomEnabled] = useState(false);
   const navPeriods = ["Last Month", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "20 Yr"];
   const [activeWindow, setActiveWindow] = useState("5 Yr");
 
   const { data: priceData, isLoading: loadingPrice } = useQuery({
-    queryKey: ["navData", "price", selectedIndices, benchmark, activeWindow],
+    queryKey: ["navData", "price", selectedIndices, benchmark, activeWindow, referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/nav-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metric: "nav", periods: [activeWindow], indices: selectedIndices, benchmark })
+        body: JSON.stringify({ metric: "nav", periods: [activeWindow], indices: selectedIndices, benchmark, reference_date: referenceDate })
       });
       return res.json();
     },
@@ -32,12 +32,12 @@ export function NavView() {
   });
 
   const { data: ddData, isLoading: loadingDd } = useQuery({
-    queryKey: ["navData", "drawdown", selectedIndices, benchmark, activeWindow],
+    queryKey: ["navData", "drawdown", selectedIndices, benchmark, activeWindow, referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/nav-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metric: "drawdown", periods: [activeWindow], indices: selectedIndices, benchmark })
+        body: JSON.stringify({ metric: "drawdown", periods: [activeWindow], indices: selectedIndices, benchmark, reference_date: referenceDate })
       });
       return res.json();
     },

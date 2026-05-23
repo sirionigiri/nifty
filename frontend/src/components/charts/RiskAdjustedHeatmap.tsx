@@ -14,15 +14,15 @@ const PROFESSIONAL_SCALE = [
 ];
 
 export function RiskAdjustedHeatmap() {
-  const { selectedIndices, benchmark, periods } = useStore()
+  const { selectedIndices, benchmark, periods, referenceDate } = useStore()
 
   const { data, isLoading } = useQuery({
-    queryKey: ["metrics", "te", selectedIndices, benchmark, periods],
+    queryKey: ["metrics", "te", selectedIndices, benchmark, periods, referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/metrics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metric: "te", periods, indices: selectedIndices, benchmark })
+        body: JSON.stringify({ metric: "te", periods, indices: selectedIndices, benchmark, reference_date: referenceDate })
       })
       return res.json()
     },

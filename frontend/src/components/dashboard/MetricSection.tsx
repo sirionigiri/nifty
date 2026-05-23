@@ -17,7 +17,7 @@ import { API_BASE_URL } from "@/lib/utils"
 import { toast } from "sonner" 
 
 export function MetricSection({ title, metric, chartLabel, colorMode = "categorical" }: any) {
-  const { selectedIndices, benchmark, periods } = useStore();
+  const { selectedIndices, benchmark, periods, referenceDate } = useStore();
   const [zoomEnabled, setZoomEnabled] = useState(false);
   
   const searchParams = useSearchParams()
@@ -28,12 +28,12 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
   const activePeriodFromUrl = searchParams.get(periodKey)
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["metrics", metric, selectedIndices, benchmark, periods],
+    queryKey: ["metrics", metric, selectedIndices, benchmark, periods, referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/metrics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metric, periods, indices: selectedIndices, benchmark })
+        body: JSON.stringify({ metric, periods, indices: selectedIndices, benchmark, reference_date: referenceDate })
       });
       
       // If server returns 500, throw error to trigger isError

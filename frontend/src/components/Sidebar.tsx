@@ -10,11 +10,16 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Input } from "@/components/ui/input"
 import { Download, FileSpreadsheet, Search, Loader2 } from "lucide-react"
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { exportToExcel, exportFullReport } from "@/lib/export"
 import { LoadingSpinner } from "./ui/LoadingSpinner"
+import { Calendar } from "@/components/ui/calendar"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { format } from "date-fns"
+import { Calendar as CalendarIcon } from "lucide-react"
 
 import { API_BASE_URL } from "@/lib/utils" // 1. Import it
+
 
 const fetchConfig = async (): Promise<{ indices: string[], categories: CategoryMap }> => {
   // 2. Use backticks (`) and the variable
@@ -29,15 +34,33 @@ const PERIOD_MASTER_ORDER = [
 ];
 
 export function Sidebar() {
-  const { selectedIndices, setSelectedIndices, benchmark, periods, setPeriods, toggleIndex, setBenchmark, deselectAll } = useStore();
+  const { referenceDate, setReferenceDate, selectedIndices, setSelectedIndices, benchmark, periods, setPeriods, toggleIndex, setBenchmark, deselectAll } = useStore();
   const [searchQuery, setSearchQuery] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+  const[inputValue, setInputValue] = useState(referenceDate);
 
   const { data: config, isLoading, error } = useQuery({
     queryKey: ["appConfig"],
     queryFn: fetchConfig,
     staleTime: 0
   });
+
+  useEffect(() => {
+    setInputValue(referenceDate);
+  }, [referenceDate]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setInputValue(val);
+    
+    // If user types a valid date (YYYY-MM-DD), update the global store automatically
+    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+        const date = new Date(val);
+        if (!isNaN(date.getTime())) {
+            setReferenceDate(val);
+        }
+    }
+  };
 
   // 1. Organize Categories & Dynamic "Others"
   const organizedCategories = useMemo(() => {
@@ -123,6 +146,49 @@ export function Sidebar() {
       <ScrollArea className="flex-1 overflow-y-auto px-4 py-4 sidebar-scroll">
         <div className="space-y-8">
           <div className="px-1 space-y-4">
+            {/* REFERENCE DATE SELECTOR */}
+            <div className="px-1 space-y-2">
+              <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Reference Date</h3>
+              <div className="flex-col gap-2 flex">
+                {/* MANUAL TYPE INPUT */}
+                <Input 
+                   value={inputValue}
+                    onChange={handleInputChange}
+                    placeholder="YYYY-MM-DD"
+                    className="h-10 rounded-xl text-xs font-bold tabular-nums text-center"
+                />
+
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" className="flex justify-center font-bold text-xs h-10 rounded-xl border-slate-200 dark:border-slate-800">
+                      <CalendarIcon className="mr-2 h-3.5 w-3.5 text-blue-600" />
+                      {referenceDate ? format(new Date(referenceDate), "MMM dd, yyyy") : "Pick"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0 rounded-2xl shadow-2xl border-slate-200 dark:border-slate-800" align="start">
+                    <Calendar
+                      
+                      mode="single"
+                      // In v9, use 'dropdown' to show month/year selectors
+                      captionLayout="dropdown" 
+                      // You must provide these for the dropdowns to appear
+                      startMonth={new Date(2005, 0)} 
+                      endMonth={new Date()}
+                      selected={referenceDate ? new Date(referenceDate) : new Date()}
+                      onSelect={(date) => {
+                        if (date) {
+                          setReferenceDate(format(date, "yyyy-MM-dd"));
+                        }
+                      }}
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
+
+              <p className="text-[9px] text-slate-400 italic px-1 leading-tight">
+                All analytics will be calculated as if this was the latest date in the data.
+              </p>
+            </div>
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Categories</h3>
               <button onClick={deselectAll} className="text-[10px] font-bold text-blue-500 hover:text-blue-600 uppercase">Clear Global</button>

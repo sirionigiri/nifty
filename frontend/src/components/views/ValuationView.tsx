@@ -31,7 +31,7 @@ import { API_BASE_URL } from "@/lib/utils"
 
 
 export function ValuationView() {
-  const { selectedIndices, benchmark } = useStore();
+  const { selectedIndices, benchmark, referenceDate } = useStore();
   
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(benchmark);
@@ -52,7 +52,7 @@ export function ValuationView() {
       const res = await fetch(`${API_BASE_URL}/api/valuation-data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ benchmark: activeIndex, indices: [], metric: "", periods: [activeWindow] })
+        body: JSON.stringify({ benchmark: activeIndex, indices: [], metric: "", periods: [activeWindow], reference_date: referenceDate })
       });
       return res.json();
     },

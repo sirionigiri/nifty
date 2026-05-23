@@ -13,7 +13,7 @@ import { API_BASE_URL } from "@/lib/utils"
 
 
 export function RankingsTable() {
-  const { selectedIndices, benchmark } = useStore()
+  const { selectedIndices, benchmark, periods, referenceDate } = useStore()
 
 
   const handleDownload = () => {
@@ -23,12 +23,12 @@ export function RankingsTable() {
 
 
   const { data, isLoading } = useQuery({
-    queryKey: ["rankings", selectedIndices],
+    queryKey: ["rankings", selectedIndices, benchmark, periods, referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/rankings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ indices: selectedIndices, benchmark, metric: "rank", periods: [] })
+        body: JSON.stringify({ indices: selectedIndices, benchmark, metric: "rank", periods: [], reference_date: referenceDate })
       })
       return res.json()
     },

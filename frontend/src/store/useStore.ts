@@ -1,3 +1,4 @@
+import { format } from 'date-fns/format';
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 
@@ -7,6 +8,8 @@ interface FilterState {
   selectedIndices: string[];
   benchmark: string;
   periods: string[];
+  referenceDate: string; // ISO string format
+  setReferenceDate: (date: string) => void;
   toggleIndex: (index: string) => void;
   setSelectedIndices: (indices: string[]) => void;
   setBenchmark: (benchmark: string) => void;
@@ -22,7 +25,9 @@ export const useStore = create<FilterState>()(
       selectedIndices: ["NIFTY 50", "NIFTY NEXT 50"],
       benchmark: 'NIFTY 50',
       periods: DEFAULT_PERIODS,
-      
+      referenceDate: format(new Date(), "yyyy-MM-dd"),
+
+      setReferenceDate: (date) => set({ referenceDate: date }),
       toggleIndex: (index) => set((state) => ({
         selectedIndices: state.selectedIndices.includes(index)
           ? state.selectedIndices.filter((i) => i !== index)
