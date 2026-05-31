@@ -58,9 +58,9 @@ CATEGORY_MAP = {
     ],
 }
 
-PRESET_PERIODS = ["Last Week", "Last Month", "3 Month", "6 Month",  "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "15 Yr", "20 Yr"]
+PRESET_PERIODS = ["Last Week", "Last Month", "3 Month", "6 Month",  "YTD", "MTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "15 Yr", "20 Yr"]
 ROLL3_LABEL = "Rolling 3-Yr Avg"
-ABS_PERIODS = ["Last Week", "Last Month", "3 Month", "6 Month", "YTD"]
+ABS_PERIODS = ["Last Week", "MTD", "Last Month", "3 Month", "6 Month", "YTD"]
 
 
 # ── Analytics helpers ─────────────────────────────────────────────────────
@@ -126,6 +126,7 @@ def get_start_date(label, end_actual, slider_years=None):
     if label == "3 Month":    return end_actual - pd.DateOffset(months=3)
     if label == "6 Month":    return end_actual - pd.DateOffset(months=6)
     if label == "YTD": return pd.Timestamp(f"{end_actual.year}-01-01") - pd.Timedelta(days=1)
+    if label == "MTD": return pd.Timestamp(f"{end_actual.year}-{end_actual.month:02d}-01")
     if label == "1 Yr": return end_actual - pd.DateOffset(years=1)
     if label == "3 Yr": return end_actual - pd.DateOffset(years=3)
     if label == "5 Yr": return end_actual - pd.DateOffset(years=5)

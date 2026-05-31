@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+from fastapi.responses import StreamingResponse
 import pandas as pd
 import numpy as np
 import os
@@ -14,6 +15,7 @@ import logging
 # 1. --- ANALYTICS ENGINE IMPORTS ---
 # Ensure these functions exist in your analytics.py
 from analytics import (
+    calc_rolling3_metric,
     load_and_prepare, 
     build_table, 
     get_start_date, 
@@ -161,7 +163,6 @@ def get_metrics_table(request: MetricsRequest):
     try:
         effective_ed = get_effective_end_date(request.reference_date)
         
-        # Clean incoming request indices for matching
         all_cols = DATA['rebased'].columns.tolist()
         req_indices = [idx.strip().upper() for idx in request.indices]
         valid_indices = [c for c in all_cols if c.strip().upper() in req_indices]
@@ -173,16 +174,12 @@ def get_metrics_table(request: MetricsRequest):
                   cols=valid_indices, bench=bench_match, end_actual=effective_ed, 
                   include_roll3=(request.metric != 'mdd'))
 
-        # Handle derived vs direct metrics
         if request.metric == "exc":
-            # Alpha = Index CAGR - Bench CAGR
             df_c = build_table(metric='cagr', **kw)
             df_res = df_c.sub(df_c[bench_match], axis=0)
         elif request.metric == "ra":
-            # Risk Adjusted = CAGR / Vol
             df_res = build_table(metric='cagr', **kw) / build_table(metric='vol', **kw)
         elif request.metric == "ir":
-            # Information Ratio = Alpha / Tracking Error
             df_c = build_table(metric='cagr', **kw)
             df_e = df_c.sub(df_c[bench_match], axis=0)
             df_t = build_table(metric='te', **kw)
@@ -190,7 +187,7 @@ def get_metrics_table(request: MetricsRequest):
         else:
             df_res = build_table(metric=request.metric, **kw)
         
-        # Inject Date Ranges Metadata for each row
+        # --- DATE RANGES METADATA ---
         ed_str = effective_ed.strftime('%d %b %y')
         date_ranges = {}
         for p in df_res.index:
@@ -199,7 +196,15 @@ def get_metrics_table(request: MetricsRequest):
                 date_ranges[p] = f"Jan {yr-2} - Dec {yr}"
             else:
                 sd = get_start_date(p, effective_ed)
-                sd_show = pd.Timestamp(f"{effective_ed.year}-01-01") if p == "YTD" else sd
+                
+                # FIX: Clean start dates for MTD and YTD visuals
+                if p == "MTD":
+                    sd_show = pd.Timestamp(f"{effective_ed.year}-{effective_ed.month:02d}-01")
+                elif p == "YTD":
+                    sd_show = pd.Timestamp(f"{effective_ed.year}-01-01")
+                else:
+                    sd_show = sd
+                    
                 date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
 
         df_res = df_res.reset_index().rename(columns={'index': 'Period'})
@@ -212,7 +217,9 @@ def get_metrics_table(request: MetricsRequest):
     except Exception as e:
         logger.error(f"Metrics Error: {e}")
         return {"data": [], "error": str(e)}
-
+    
+    
+    
 @app.post("/api/valuation-data")
 def get_valuation_data(request: MetricsRequest):
     if 'valuation' not in DATA: raise HTTPException(status_code=503)
@@ -321,6 +328,127 @@ def get_calendar_rankings(request: MetricsRequest):
             if valid: results.append(item)
         return results
     except: return []
+    
+
+import xlsxwriter
+from fastapi.responses import StreamingResponse
+import io
+
+# 1. --- DEFINE THE INDEX TO TYPE MAPPING ---
+# This ensures Column B in Excel says "Energy", "Auto", etc.
+import xlsxwriter
+from fastapi.responses import StreamingResponse
+import io
+
+import xlsxwriter
+from fastapi.responses import StreamingResponse
+import io
+
+# --- REPORT MAPPINGS ---
+REPORT_TYPE_MAP = {
+    "NIFTY 500": "Benchmark", "NIFTY ENERGY": "Energy", "NIFTY AUTO": "Auto", "NIFTY INDIA MFG": "Manufacturing",
+    "NIFTY BANK": "Banks", "NIFTY CAPITAL MKT": "Capital Market", "NIFTY FINANCIAL SERVICES EX-BANK": "Finserv",
+    "NIFTY CPSE": "Energy", "NIFTY CEMENT": "Infra", "NIFTY CHEMICALS": "Chemicals", "NIFTY METAL": "Metals",
+    "NIFTY MNC": "MNC", "NIFTY HEALTHCARE": "Pharma", "NIFTY IT": "IT", "NIFTY IPO": "IPO",
+    "NIFTY IND DEFENCE": "Defence", "NIFTY IND TOURISM": "Tourism", "NIFTY INFRA": "Infra", "NIFTY REALTY": "Real Estate"
+}
+
+# --- STATIC RANKING DATA (2006 - 2025) ---
+FACTOR_RANKS_HISTORICAL = [
+    ["Rank", "2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025"],
+    ["1", "Value", "Momentum", "Low Vol", "NIFTY 500", "Quality", "Momentum", "Value", "Value", "Momentum", "Value"],
+    ["2", "NIFTY 500", "Equal Weight", "NIFTY 500", "Momentum", "Equal Weight", "Value", "Low Vol", "Momentum", "Quality", "Low Vol"],
+    ["3", "Momentum", "Value", "Quality", "Low Vol", "Low Vol", "Equal Weight", "NIFTY 500", "Equal Weight", "Equal Weight", "NIFTY 500"],
+    ["4", "Low Vol", "NIFTY 500", "Momentum", "Quality", "Momentum", "NIFTY 500", "Equal Weight", "Quality", "Value", "Equal Weight"],
+    ["5", "Quality", "Quality", "Equal Weight", "Equal Weight", "NIFTY 500", "Quality", "Quality", "Low Vol", "NIFTY 500", "Quality"],
+    ["6", "Value", "Low Vol", "Value", "Value", "Value", "Low Vol", "Momentum", "NIFTY 500", "Low Vol", "Momentum"]
+]
+
+@app.post("/api/generate-report")
+async def generate_report(request: MetricsRequest):
+    if 'rebased' not in DATA: raise HTTPException(503)
+    effective_ed = get_effective_end_date(request.reference_date)
+    output = io.BytesIO()
+    workbook = xlsxwriter.Workbook(output)
+
+    # --- FORMATS ---
+    title_f = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': 'black', 'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 12})
+    head_f = workbook.add_format({'bold': True, 'bg_color': '#F2F2F2', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 10})
+    text_f = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'font_size': 9})
+    num_f = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
+    perc_f = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
+    italic_f = workbook.add_format({'italic': True, 'font_size': 8, 'text_wrap': True})
+
+    def get_perf_row(idx, ed, periods):
+        results = []
+        for p in periods:
+            try:
+                if p == "Rolling 3-Yr Avg":
+                    val = calc_rolling3_metric(DATA['rebased'], DATA['returns'], 'cagr', [idx], request.benchmark, ed)[idx]
+                else:
+                    sd = get_start_date(p, ed)
+                    sd_calc = pd.Timestamp(f"{ed.year}-{ed.month:02d}-01") if p == "MTD" else (pd.Timestamp(f"{ed.year}-01-01") if p == "YTD" else sd)
+                    val = calc_cagr(DATA['rebased'], sd_calc, ed, [idx], label=p)[idx]
+                results.append(clean_float(val))
+            except: results.append(None)
+        return results
+
+    def get_val_row(idx, ed):
+        try:
+            latest = DATA['valuation'][(DATA['valuation']['Index_Name'] == idx) & (DATA['valuation']['Date'] <= ed)].iloc[-1]
+            return [clean_float(latest['PE']), clean_float(latest['PB']), clean_float(latest['Div_Yield'])]
+        except: return [None, None, None]
+
+    # --- SHEET 1: SECTOR & THEMATIC ---
+    ws1 = workbook.add_worksheet("Sector & Thematic")
+    ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
+    
+    # Define Column Order from request periods
+    col_headers = ["Thematic/Sector Indices"] + request.periods + ["P/E", "P/B", "DY"]
+    ws1.write_row('A2', col_headers, head_f)
+
+    row = 2
+    # Ensure Benchmark is first
+    indices = [request.benchmark] + [i for i in request.indices if i != request.benchmark]
+    
+    for idx in indices[:20]: # Follows your Row 22 limit
+        ws1.write(row, 0, idx, text_f)
+        ws1.write_row(row, 1, get_perf_row(idx, effective_ed, request.periods), perc_f)
+        # Offset depends on number of periods
+        ws1.write_row(row, 1 + len(request.periods), get_val_row(idx, effective_ed), num_f)
+        row += 1
+
+    # Row 23 Disclaimer
+    ws1.merge_range(22, 0, 24, 10, f"Source: www.niftyindices.com and ElevateWealth. Total Returns in INR for period ending {effective_ed.date()}. Rolling 3-Yr average returns calculated since Dec 2020. All returns annualized except < 1yr. Valuations calculated as of {effective_ed.date()}.", italic_f)
+
+    # --- SHEET 2: FACTOR DASHBOARD ---
+    ws2 = workbook.add_worksheet("Factor Dashboard")
+    ws2.merge_range('A1:K1', 'Factor Dashboard', title_f)
+    ws2.write_row('A2', ["Factor Indices"] + request.periods + ["Volatility", "Risk-Adj", "Max DD"], head_f)
+
+    row = 2
+    for idx in indices:
+        ws2.write(row, 0, idx, text_f)
+        ws2.write_row(row, 1, get_perf_row(idx, effective_ed, request.periods), perc_f)
+        
+        # Risk Metrics (Since Inception)
+        try:
+            incept = DATA['rebased'][idx].dropna().index.min()
+            vol = calc_vol(DATA['returns'], incept, effective_ed, [idx])[idx]
+            mdd = calc_mdd(DATA['rebased'], incept, effective_ed, [idx])[idx]
+            ra = calc_cagr(DATA['rebased'], incept, effective_ed, [idx])[idx] / vol if vol else 0
+            ws2.write_row(row, 1 + len(request.periods), [clean_float(vol), clean_float(ra), clean_float(mdd)], num_f)
+        except: pass
+        row += 1
+
+    # Write Ranking Table
+    row += 2
+    for r_idx, r_data in enumerate(FACTOR_RANKS_HISTORICAL):
+        ws2.write_row(row + r_idx, 0, r_data, text_f)
+    
+    workbook.close()
+    output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=NSE_Report_{effective_ed.strftime('%Y%m%d')}.xlsx"})
 
 if __name__ == "__main__":
     import uvicorn

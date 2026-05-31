@@ -143,7 +143,7 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
         const val = row.getValue(key);
         const range = row.original.Range;
         if (key === 'Period') {
-            const isAbs = ["Last Week", "Last Month", "3 Month", "6 Month", "YTD"].includes(val);
+            const isAbs = ["Last Week", "MTD", "Last Month", "3 Month", "6 Month", "YTD"].includes(val);
             return (
               <div className="p-3 flex flex-col leading-tight whitespace-nowrap text-left">
                 <div className="flex items-center gap-2">

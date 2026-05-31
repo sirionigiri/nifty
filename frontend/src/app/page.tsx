@@ -58,7 +58,7 @@ function DashboardContent() {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live
             </span>
             <p className="text-[11px] text-slate-500 font-bold uppercase tracking-widest hidden md:block">
-              NSE Index Screener · Engine: Python 3.12
+              NSE Index Screener · Engine: Python 
             </p>
           </div>
           <div className="flex items-center gap-4">

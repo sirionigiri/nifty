@@ -17,6 +17,7 @@ import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { format } from "date-fns"
 import { Calendar as CalendarIcon } from "lucide-react"
+import { ReportModal } from "./dashboard/ReportModal"
 
 import { API_BASE_URL } from "@/lib/utils" // 1. Import it
 
@@ -148,7 +149,7 @@ export function Sidebar() {
           <div className="px-1 space-y-4">
             {/* REFERENCE DATE SELECTOR */}
             <div className="px-1 space-y-2">
-              <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Reference Date</h3>
+              <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Reference End Date</h3>
               <div className="flex-col gap-2 flex">
                 {/* MANUAL TYPE INPUT */}
                 <Input 
@@ -251,7 +252,7 @@ export function Sidebar() {
           <div className="px-1 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-4">
             <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Time Periods</h3>
             <div className="grid grid-cols-2 gap-2">
-              {["Last Week", "Last Month", "3 Month", "6 Month", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "20 Yr", "Rolling 3-Yr Avg"].map(p => (
+              {["Last Week", "MTD", "Last Month", "3 Month", "6 Month", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "20 Yr", "Rolling 3-Yr Avg"].map(p => (
                 <div key={p} className="flex items-center space-x-2 p-1">
                   <Checkbox 
                     id={`p-${p}`}
@@ -292,14 +293,9 @@ export function Sidebar() {
         <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-widest h-11 rounded-xl shadow-md active:scale-95 transition-all">
           Apply Filters
         </Button>
-        <div className="grid grid-cols-2 gap-2">
-          <Button variant="outline" disabled={isGenerating} onClick={handleDownloadFullReport} className="w-full text-[10px] font-bold uppercase tracking-wider h-9 rounded-lg text-slate-500 border-slate-200 dark:border-slate-800 hover:bg-slate-50">
-            {isGenerating ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <FileSpreadsheet className="w-3 h-3 mr-1 text-emerald-500" />} Report
-          </Button>
-          <Button variant="outline" onClick={() => exportToExcel([{Benchmark: benchmark, Indices: selectedIndices.join(', ')}], "Config")} className="w-full text-[10px] font-bold uppercase tracking-wider h-9 rounded-lg text-slate-500 border-slate-200 dark:border-slate-800 hover:bg-slate-50">
-            <Download className="w-3 h-3 mr-1 text-blue-500" /> Config
-          </Button>
-        </div>
+
+        <ReportModal /> 
+
       </div>
     </aside>
   );

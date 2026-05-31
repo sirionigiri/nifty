@@ -3,7 +3,7 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 
 export type CategoryMap = Record<string, string[]>;
-const DEFAULT_PERIODS = ["Last Week", "Last Month", "3 Month", "6 Month", "YTD", "1 Yr", "3 Yr", "5 Yr", "Rolling 3-Yr Avg"];
+const DEFAULT_PERIODS = ["Last Week", "Last Month", "3 Month", "6 Month", "YTD", "MTD", "1 Yr", "3 Yr", "5 Yr", "Rolling 3-Yr Avg"];
 interface FilterState {
   selectedIndices: string[];
   benchmark: string;
