@@ -1,45 +1,65 @@
+"""
+NSE Screener Backend — FastAPI
+Endpoints: /api/config, /api/summary, /api/metrics, /api/valuation-data,
+           /api/nav-data, /api/scatter-data, /api/calendar-returns,
+           /api/rankings, /api/generate-report
+"""
+
+# ── Standard Library ──────────────────────────────────────────────────────────
+import io
+import logging
+import os
+import time
+
+# ── Third-Party ───────────────────────────────────────────────────────────────
+import httpx
+import numpy as np
+import pandas as pd
+import xlsxwriter
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
 from fastapi.responses import StreamingResponse
-import pandas as pd
-import numpy as np
-import os
-import httpx
-import io 
-import time
-import logging
+from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from typing import List, Optional
+import matplotlib.pyplot as plt
 
-# 1. --- ANALYTICS ENGINE IMPORTS ---
-# Ensure these functions exist in your analytics.py
+# ── Internal ──────────────────────────────────────────────────────────────────
 from analytics import (
+    CATEGORY_MAP,
+    build_table,
+    calc_beta,
+    calc_cagr,
+    calc_mdd,
     calc_rolling3_metric,
-    load_and_prepare, 
-    build_table, 
-    get_start_date, 
-    calc_cagr, 
-    calc_vol, 
-    calc_mdd, 
-    calc_beta, 
-    CATEGORY_MAP
+    calc_vol,
+    get_start_date,
+    load_and_prepare,
 )
 
-# 2. --- LOGGING SETUP ---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────────────────────────────────
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APP & MIDDLEWARE
+# ─────────────────────────────────────────────────────────────────────────────
+
 app = FastAPI()
 
-# 3. --- MIDDLEWARE (CORS & CACHING & TIMING) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, replace "*" with your Vercel URL
+    allow_origins=["*"],  # In production replace "*" with your Vercel URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 class CacheControlMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -48,7 +68,9 @@ class CacheControlMiddleware(BaseHTTPMiddleware):
             response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 
+
 app.add_middleware(CacheControlMiddleware)
+
 
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
@@ -60,300 +82,41 @@ async def add_process_time_header(request: Request, call_next):
     response.headers["X-Process-Time"] = str(process_time)
     return response
 
-# 4. --- REQUEST MODELS & HELPERS ---
-class MetricsRequest(BaseModel):
-    metric: str
-    periods: List[str]
-    indices: List[str]
-    benchmark: str
-    reference_date: Optional[str] = None
 
-DATA = {}
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+
 URL_RETURNS = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/nifty_data.parquet"
 URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/valuation_data.parquet"
 
-def get_effective_end_date(req_date):
-    """Calculates the 'Today' for the calculation based on user selection."""
-    if req_date:
-        try:
-            return pd.to_datetime(req_date).normalize()
-        except:
-            return DATA.get('end_date')
-    return DATA.get('end_date')
+# In-memory data store populated at startup
+DATA: dict = {}
 
-def clean_float(val):
-    """Ensures value is JSON compliant (NaN/Inf -> None/null)"""
-    if val is None or not np.isfinite(val):
-        return None
-    return round(float(val), 2)
-
-# 5. --- STARTUP ---
-@app.on_event("startup")
-async def startup_event():
-    async with httpx.AsyncClient() as client:
-        try:
-            logger.info("Fetching Returns Data from GitHub...")
-            res1 = await client.get(URL_RETURNS, timeout=60)
-            if res1.status_code != 200: raise Exception("Returns file not found")
-            
-            df_returns = pd.read_parquet(io.BytesIO(res1.content))
-            df_returns.columns = [c.strip() for c in df_returns.columns]
-            prepared = load_and_prepare(df_returns)
-            
-            DATA['rebased'] = prepared['rebased']
-            DATA['returns'] = prepared['returns']
-            DATA['yearly']  = prepared['yearly']
-            DATA['end_date'] = prepared['end_date']
-            DATA['indices'] = prepared['indices']
-
-            logger.info("Fetching Valuation Data from GitHub...")
-            res2 = await client.get(URL_VALUATION, timeout=60)
-            if res2.status_code == 200:
-                df_val = pd.read_parquet(io.BytesIO(res2.content))
-                df_val['Date'] = pd.to_datetime(df_val['Date'])
-                DATA['valuation'] = df_val
-            
-            logger.info("✅ BACKEND ENGINE READY")
-        except Exception as e:
-            logger.error(f"❌ Startup Failure: {e}")
-
-# 6. --- ENDPOINTS ---
-
-@app.get("/api/config")
-def get_config():
-    if 'indices' not in DATA: raise HTTPException(status_code=503)
-    return {"indices": DATA['indices'], "categories": CATEGORY_MAP}
-
-@app.post("/api/summary")
-def get_summary_metrics(request: MetricsRequest):
-    if 'rebased' not in DATA: return {"error": "Data not loaded"}
-    try:
-        effective_ed = get_effective_end_date(request.reference_date)
-        df_rb, df_ret = DATA['rebased'], DATA['returns']
-        
-        bench_name = next((c for c in df_rb.columns if c.upper() == request.benchmark.upper()), df_rb.columns[0])
-        
-        # Calculations relative to Reference Date
-        c1 = calc_cagr(df_rb, get_start_date("1 Yr", effective_ed), effective_ed, [bench_name], label="1 Yr")[bench_name]
-        c20 = calc_cagr(df_rb, get_start_date("20 Yr", effective_ed), effective_ed, [bench_name], label="20 Yr")[bench_name]
-        
-        # YTD window: Jan 1st of Reference Year to Reference Date
-        ytd_start = pd.Timestamp(f"{effective_ed.year}-01-01")
-        dd_ytd = calc_mdd(df_rb, ytd_start, effective_ed, [bench_name])[bench_name]
-        v_ytd = calc_vol(df_ret, ytd_start, effective_ed, [bench_name])[bench_name]
-
-        def fmt_summary(val):
-            if val is None or not np.isfinite(val): return "—"
-            return f"{val:+.1f}%"
-
-        return {
-            "cagr1": fmt_summary(c1),
-            "cagr20": fmt_summary(c20),
-            "mdd1": fmt_summary(dd_ytd),
-            "vol1": fmt_summary(v_ytd),
-            "count": len(request.indices)
-        }
-    except Exception as e:
-        logger.error(f"Summary Error: {e}")
-        return {"error": str(e)}
-
-@app.post("/api/metrics")
-def get_metrics_table(request: MetricsRequest):
-    if 'rebased' not in DATA: raise HTTPException(status_code=503)
-    try:
-        effective_ed = get_effective_end_date(request.reference_date)
-        
-        all_cols = DATA['rebased'].columns.tolist()
-        req_indices = [idx.strip().upper() for idx in request.indices]
-        valid_indices = [c for c in all_cols if c.strip().upper() in req_indices]
-        bench_match = next((c for c in all_cols if c.strip().upper() == request.benchmark.strip().upper()), "NIFTY 50")
-
-        if not valid_indices: return {"data": [], "error": "No valid indices selected"}
-
-        kw = dict(df_rb=DATA['rebased'], df_ret=DATA['returns'], periods=request.periods,
-                  cols=valid_indices, bench=bench_match, end_actual=effective_ed, 
-                  include_roll3=(request.metric != 'mdd'))
-
-        if request.metric == "exc":
-            df_c = build_table(metric='cagr', **kw)
-            df_res = df_c.sub(df_c[bench_match], axis=0)
-        elif request.metric == "ra":
-            df_res = build_table(metric='cagr', **kw) / build_table(metric='vol', **kw)
-        elif request.metric == "ir":
-            df_c = build_table(metric='cagr', **kw)
-            df_e = df_c.sub(df_c[bench_match], axis=0)
-            df_t = build_table(metric='te', **kw)
-            df_res = df_e / df_t
-        else:
-            df_res = build_table(metric=request.metric, **kw)
-        
-        # --- DATE RANGES METADATA ---
-        ed_str = effective_ed.strftime('%d %b %y')
-        date_ranges = {}
-        for p in df_res.index:
-            if p == "Rolling 3-Yr Avg":
-                yr = effective_ed.year - 1
-                date_ranges[p] = f"Jan {yr-2} - Dec {yr}"
-            else:
-                sd = get_start_date(p, effective_ed)
-                
-                # FIX: Clean start dates for MTD and YTD visuals
-                if p == "MTD":
-                    sd_show = pd.Timestamp(f"{effective_ed.year}-{effective_ed.month:02d}-01")
-                elif p == "YTD":
-                    sd_show = pd.Timestamp(f"{effective_ed.year}-01-01")
-                else:
-                    sd_show = sd
-                    
-                date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
-
-        df_res = df_res.reset_index().rename(columns={'index': 'Period'})
-        df_res['Range'] = df_res['Period'].map(date_ranges)
-        
-        return {
-            "data": df_res.replace({np.nan: None, np.inf: None, -np.inf: None}).to_dict('records'), 
-            "error": None
-        }
-    except Exception as e:
-        logger.error(f"Metrics Error: {e}")
-        return {"data": [], "error": str(e)}
-    
-    
-    
-@app.post("/api/valuation-data")
-def get_valuation_data(request: MetricsRequest):
-    if 'valuation' not in DATA: raise HTTPException(status_code=503)
-    try:
-        effective_ed = get_effective_end_date(request.reference_date)
-        df_full = DATA['valuation']
-        
-        # Filter for Target Index
-        df = df_full[df_full['Index_Name'].str.strip().str.upper() == request.benchmark.strip().upper()].sort_values('Date')
-        if df.empty: return {"error": f"No valuation data for {request.benchmark}"}
-
-        # Slice Window between start of period and reference date
-        period = request.periods[0] if request.periods else "5 Yr"
-        sd = get_start_date(period, effective_ed)
-        df_window = df[(df['Date'] >= sd) & (df['Date'] <= effective_ed)]
-
-        if df_window.empty: return {"error": "Insufficient data in window"}
-
-        def get_stats(col):
-            # Calculate long-term norms from full historical dataset
-            series = df[col].dropna()
-            if series.empty: return None
-            m, s = series.median(), series.std()
-            return {
-                "median": clean_float(m), "upper4": clean_float(m+4*s), "upper3": clean_float(m+3*s),
-                "upper2": clean_float(m+2*s), "upper1": clean_float(m+s), "lower1": clean_float(m-s), "lower2": clean_float(m-2*s)
-            }
-
-        return {
-            "dates": df_window['Date'].dt.strftime('%Y-%m-%d').tolist(),
-            "pe": {"values": [clean_float(v) for v in df_window['PE']], "stats": get_stats('PE')},
-            "pb": {"values": [clean_float(v) for v in df_window['PB']], "stats": get_stats('PB')},
-            "dy": {"values": [clean_float(v) for v in df_window['Div_Yield']], "stats": get_stats('Div_Yield')}
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/api/nav-data")
-def get_nav_data(request: MetricsRequest):
-    if 'rebased' not in DATA: raise HTTPException(status_code=503)
-    effective_ed = get_effective_end_date(request.reference_date)
-    sd = get_start_date(request.periods[0], effective_ed)
-    
-    valid_cols = [c for c in request.indices if c in DATA['rebased'].columns]
-    if request.benchmark and request.benchmark not in valid_cols: valid_cols.append(request.benchmark)
-
-    # Slice strictly between start and effective end
-    df = DATA['rebased'][valid_cols].loc[(DATA['rebased'].index >= sd) & (DATA['rebased'].index <= effective_ed)].dropna(how='all')
-    if df.empty: return []
-
-    if request.metric == "drawdown":
-        df = (df / df.cummax() - 1) * 100 
-    else:
-        # Rebase to 100 at the first available point in this window
-        df = df.apply(lambda col: col / col.dropna().iloc[0] * 100 if col.dropna().size > 0 else col)
-    
-    output = []
-    for col in df.columns:
-        s = df[col].dropna()
-        output.append({"x": s.index.strftime('%Y-%m-%d').tolist(), "y": s.values.tolist(), "name": col})
-    return output
-
-@app.post("/api/scatter-data")
-def get_scatter_data(request: MetricsRequest):
-    if 'rebased' not in DATA: return []
-    effective_ed = get_effective_end_date(request.reference_date)
-    sd = get_start_date(request.periods[0] if request.periods else "5 Yr", effective_ed)
-    
-    valid_indices = [idx for idx in request.indices if idx in DATA['rebased'].columns]
-    if not valid_indices: return []
-
-    cagrs = calc_cagr(DATA['rebased'], sd, effective_ed, valid_indices)
-    vols = calc_vol(DATA['returns'], sd, effective_ed, valid_indices)
-    
-    return [
-        {"index": idx, "return": clean_float(cagrs.get(idx)), "risk": clean_float(vols.get(idx))}
-        for idx in valid_indices if np.isfinite(cagrs.get(idx, np.nan)) and np.isfinite(vols.get(idx, np.nan))
-    ]
-
-@app.get("/api/calendar-returns")
-def get_calendar_returns():
-    if 'yearly' not in DATA: raise HTTPException(status_code=503)
-    start = DATA['rebased'].index.min().strftime('%d %b %Y')
-    end = DATA['rebased'].index.max().strftime('%d %b %Y')
-    return {
-        "data": DATA['yearly'].reset_index().replace({np.nan: None}).to_dict('records'),
-        "scope": f"{start} to {end}"
-    }
-
-@app.post("/api/rankings")
-def get_calendar_rankings(request: MetricsRequest):
-    if 'yearly' not in DATA: raise HTTPException(status_code=503)
-    try:
-        available_cols = [c for c in DATA['yearly'].columns if c.strip().upper() in [s.strip().upper() for s in request.indices]]
-        if not available_cols: return []
-        # Relative ranking for selected indices only
-        rank_df = DATA['yearly'][available_cols].rank(axis=1, ascending=False, method='min')
-        results = []
-        for year, row in rank_df.iterrows():
-            item = {"Year": str(year).split('-')[0]}
-            valid = False
-            for idx_name, rnk in row.items():
-                if not np.isnan(rnk):
-                    item[f"Rank {int(rnk)}"] = idx_name
-                    valid = True
-            if valid: results.append(item)
-        return results
-    except: return []
-    
-
-import xlsxwriter
-from fastapi.responses import StreamingResponse
-import io
-
-# 1. --- DEFINE THE INDEX TO TYPE MAPPING ---
-# This ensures Column B in Excel says "Energy", "Auto", etc.
-import xlsxwriter
-from fastapi.responses import StreamingResponse
-import io
-
-import xlsxwriter
-from fastapi.responses import StreamingResponse
-import io
-
-# --- REPORT MAPPINGS ---
-REPORT_TYPE_MAP = {
-    "NIFTY 500": "Benchmark", "NIFTY ENERGY": "Energy", "NIFTY AUTO": "Auto", "NIFTY INDIA MFG": "Manufacturing",
-    "NIFTY BANK": "Banks", "NIFTY CAPITAL MKT": "Capital Market", "NIFTY FINANCIAL SERVICES EX-BANK": "Finserv",
-    "NIFTY CPSE": "Energy", "NIFTY CEMENT": "Infra", "NIFTY CHEMICALS": "Chemicals", "NIFTY METAL": "Metals",
-    "NIFTY MNC": "MNC", "NIFTY HEALTHCARE": "Pharma", "NIFTY IT": "IT", "NIFTY IPO": "IPO",
-    "NIFTY IND DEFENCE": "Defence", "NIFTY IND TOURISM": "Tourism", "NIFTY INFRA": "Infra", "NIFTY REALTY": "Real Estate"
+# Maps index names to human-readable sector/type labels used in the Excel report
+REPORT_SECTOR_MAP = {
+    "NIFTY 500": "Benchmark",
+    "NIFTY ENERGY": "Energy",
+    "NIFTY AUTO": "Auto",
+    "NIFTY INDIA MFG": "Manufacturing",
+    "NIFTY BANK": "Banks",
+    "NIFTY CAPITAL MKT": "Capital Market",
+    "NIFTY FINANCIAL SERVICES EX-BANK": "Finserv",
+    "NIFTY CPSE": "Energy",
+    "NIFTY CEMENT": "Infra",
+    "NIFTY CHEMICALS": "Chemicals",
+    "NIFTY METAL": "Metals",
+    "NIFTY MNC": "MNC",
+    "NIFTY HEALTHCARE": "Pharma",
+    "NIFTY IT": "IT",
+    "NIFTY IPO": "IPO",
+    "NIFTY IND DEFENCE": "Defence",
+    "NIFTY IND TOURISM": "Tourism",
+    "NIFTY INFRA": "Infra",
+    "NIFTY REALTY": "Real Estate",
 }
 
-# --- STATIC RANKING DATA (2006 - 2025) ---
+# Static factor ranking table (2016–2025) written into the Excel Factor sheet
 FACTOR_RANKS_HISTORICAL = [
     ["Rank", "2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025"],
     ["1", "Value", "Momentum", "Low Vol", "NIFTY 500", "Quality", "Momentum", "Value", "Value", "Momentum", "Value"],
@@ -361,96 +124,487 @@ FACTOR_RANKS_HISTORICAL = [
     ["3", "Momentum", "Value", "Quality", "Low Vol", "Low Vol", "Equal Weight", "NIFTY 500", "Equal Weight", "Equal Weight", "NIFTY 500"],
     ["4", "Low Vol", "NIFTY 500", "Momentum", "Quality", "Momentum", "NIFTY 500", "Equal Weight", "Quality", "Value", "Equal Weight"],
     ["5", "Quality", "Quality", "Equal Weight", "Equal Weight", "NIFTY 500", "Quality", "Quality", "Low Vol", "NIFTY 500", "Quality"],
-    ["6", "Value", "Low Vol", "Value", "Value", "Value", "Low Vol", "Momentum", "NIFTY 500", "Low Vol", "Momentum"]
+    ["6", "Value", "Low Vol", "Value", "Value", "Value", "Low Vol", "Momentum", "NIFTY 500", "Low Vol", "Momentum"],
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REQUEST MODEL
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MetricsRequest(BaseModel):
+    metric: str
+    periods: List[str]
+    indices: List[str]
+    benchmark: str
+    reference_date: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def get_perf_row_data(idx, ed, periods, benchmark):
+    """Gathers performance data for a single index across multiple periods."""
+    results = []
+    for p in periods:
+        try:
+            if p == "Rolling 3-Yr Avg":
+                # Uses the pre-imported calc_rolling3_metric
+                val = calc_rolling3_metric(DATA['rebased'], DATA['returns'], 'cagr', [idx], benchmark, ed)[idx]
+            else:
+                sd = get_start_date(p, ed)
+                # Handle start dates for Absolute vs CAGR periods
+                if p == "MTD":
+                    sd_calc = pd.Timestamp(f"{ed.year}-{ed.month:02d}-01")
+                elif p == "YTD":
+                    sd_calc = pd.Timestamp(f"{ed.year}-01-01")
+                else:
+                    sd_calc = sd
+                val = calc_cagr(DATA['rebased'], sd_calc, ed, [idx], label=p)[idx]
+            results.append(clean_float(val))
+        except:
+            results.append(None)
+    return results
+
+def get_effective_end_date(req_date: Optional[str]):
+    """Return a normalized Timestamp for the requested reference date,
+    falling back to the dataset's last available date."""
+    if req_date:
+        try:
+            return pd.to_datetime(req_date).normalize()
+        except Exception:
+            pass
+    return DATA.get("end_date")
+
+
+def clean_float(val) -> Optional[float]:
+    """Convert a value to a JSON-safe float (NaN / Inf → None)."""
+    if val is None or not np.isfinite(val):
+        return None
+    return round(float(val), 2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STARTUP — load data into memory
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup_event():
+    async with httpx.AsyncClient() as client:
+        try:
+            logger.info("📡 Loading Index Returns...")
+            r1 = await client.get(URL_RETURNS, timeout=60)
+            df_returns = pd.read_parquet(io.BytesIO(r1.content))
+            df_returns.columns = [c.strip() for c in df_returns.columns]
+            prep = load_and_prepare(df_returns)
+            DATA.update(prep)
+
+            logger.info("📡 Loading Valuation Data...")
+            r2 = await client.get(URL_VALUATION, timeout=60)
+            if r2.status_code == 200:
+                df_v = pd.read_parquet(io.BytesIO(r2.content))
+                # CRITICAL: Strip names and ensure Date type for matching
+                df_v['Index_Name'] = df_v['Index_Name'].str.strip()
+                df_v['Date'] = pd.to_datetime(df_v['Date'])
+                DATA["valuation"] = df_v
+            
+            logger.info("✅ BACKEND ENGINE READY")
+        except Exception as e:
+            logger.error(f"❌ Startup Failure: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINTS — read-only / config
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/config")
+def get_config():
+    if "indices" not in DATA:
+        raise HTTPException(status_code=503)
+    return {"indices": DATA["indices"], "categories": CATEGORY_MAP}
+
+
+@app.get("/api/calendar-returns")
+def get_calendar_returns():
+    if "yearly" not in DATA:
+        raise HTTPException(status_code=503)
+    start = DATA["rebased"].index.min().strftime("%d %b %Y")
+    end = DATA["rebased"].index.max().strftime("%d %b %Y")
+    return {
+        "data": DATA["yearly"].reset_index().replace({np.nan: None}).to_dict("records"),
+        "scope": f"{start} to {end}",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINTS — metrics / analytics
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/summary")
+def get_summary_metrics(request: MetricsRequest):
+    if "rebased" not in DATA:
+        return {"error": "Data not loaded"}
+    try:
+        effective_ed = get_effective_end_date(request.reference_date)
+        df_rb = DATA["rebased"]
+
+        bench_name = next(
+            (c for c in df_rb.columns if c.upper() == request.benchmark.upper()),
+            df_rb.columns[0],
+        )
+
+        c1 = calc_cagr(df_rb, get_start_date("1 Yr", effective_ed), effective_ed, [bench_name], label="1 Yr")[bench_name]
+        c20 = calc_cagr(df_rb, get_start_date("20 Yr", effective_ed), effective_ed, [bench_name], label="20 Yr")[bench_name]
+
+        ytd_start = pd.Timestamp(f"{effective_ed.year}-01-01")
+        dd_ytd = calc_mdd(df_rb, ytd_start, effective_ed, [bench_name])[bench_name]
+        v_ytd = calc_vol(DATA["returns"], ytd_start, effective_ed, [bench_name])[bench_name]
+
+        def fmt_summary(val):
+            if val is None or not np.isfinite(val):
+                return "—"
+            return f"{val:+.1f}%"
+
+        return {
+            "cagr1": fmt_summary(c1),
+            "cagr20": fmt_summary(c20),
+            "mdd1": fmt_summary(dd_ytd),
+            "vol1": fmt_summary(v_ytd),
+            "count": len(request.indices),
+        }
+    except Exception as e:
+        logger.error(f"Summary Error: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/metrics")
+def get_metrics_table(request: MetricsRequest):
+    if "rebased" not in DATA:
+        raise HTTPException(status_code=503)
+    try:
+        effective_ed = get_effective_end_date(request.reference_date)
+
+        all_cols = DATA["rebased"].columns.tolist()
+        req_indices = [idx.strip().upper() for idx in request.indices]
+        valid_indices = [c for c in all_cols if c.strip().upper() in req_indices]
+        bench_match = next(
+            (c for c in all_cols if c.strip().upper() == request.benchmark.strip().upper()),
+            "NIFTY 50",
+        )
+
+        if not valid_indices:
+            return {"data": [], "error": "No valid indices selected"}
+
+        kw = dict(
+            df_rb=DATA["rebased"],
+            df_ret=DATA["returns"],
+            periods=request.periods,
+            cols=valid_indices,
+            bench=bench_match,
+            end_actual=effective_ed,
+            include_roll3=(request.metric != "mdd"),
+        )
+
+        if request.metric == "exc":
+            df_c = build_table(metric="cagr", **kw)
+            df_res = df_c.sub(df_c[bench_match], axis=0)
+        elif request.metric == "ra":
+            df_res = build_table(metric="cagr", **kw) / build_table(metric="vol", **kw)
+        elif request.metric == "ir":
+            df_c = build_table(metric="cagr", **kw)
+            df_e = df_c.sub(df_c[bench_match], axis=0)
+            df_t = build_table(metric="te", **kw)
+            df_res = df_e / df_t
+        else:
+            df_res = build_table(metric=request.metric, **kw)
+
+        # Build human-readable date range labels for each period row
+        ed_str = effective_ed.strftime("%d %b %y")
+        date_ranges = {}
+        for p in df_res.index:
+            if p == "Rolling 3-Yr Avg":
+                yr = effective_ed.year - 1
+                date_ranges[p] = f"Jan {yr - 2} - Dec {yr}"
+            else:
+                sd = get_start_date(p, effective_ed)
+                if p == "MTD":
+                    sd_show = pd.Timestamp(f"{effective_ed.year}-{effective_ed.month:02d}-01")
+                elif p == "YTD":
+                    sd_show = pd.Timestamp(f"{effective_ed.year}-01-01")
+                else:
+                    sd_show = sd
+                date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
+
+        df_res = df_res.reset_index().rename(columns={"index": "Period"})
+        df_res["Range"] = df_res["Period"].map(date_ranges)
+
+        return {
+            "data": df_res.replace({np.nan: None, np.inf: None, -np.inf: None}).to_dict("records"),
+            "error": None,
+        }
+    except Exception as e:
+        logger.error(f"Metrics Error: {e}")
+        return {"data": [], "error": str(e)}
+
+
+@app.post("/api/valuation-data")
+def get_valuation_data(request: MetricsRequest):
+    if "valuation" not in DATA:
+        raise HTTPException(status_code=503)
+    try:
+        effective_ed = get_effective_end_date(request.reference_date)
+        df_full = DATA["valuation"]
+
+        df = (
+            df_full[df_full["Index_Name"].str.strip().str.upper() == request.benchmark.strip().upper()]
+            .sort_values("Date")
+        )
+        if df.empty:
+            return {"error": f"No valuation data for {request.benchmark}"}
+
+        period = request.periods[0] if request.periods else "5 Yr"
+        sd = get_start_date(period, effective_ed)
+        df_window = df[(df["Date"] >= sd) & (df["Date"] <= effective_ed)]
+
+        if df_window.empty:
+            return {"error": "Insufficient data in window"}
+
+        def get_stats(col):
+            """Compute long-term stats from the full historical series."""
+            series = df[col].dropna()
+            if series.empty:
+                return None
+            m, s = series.median(), series.std()
+            return {
+                "median": clean_float(m),
+                "upper4": clean_float(m + 4 * s),
+                "upper3": clean_float(m + 3 * s),
+                "upper2": clean_float(m + 2 * s),
+                "upper1": clean_float(m + s),
+                "lower1": clean_float(m - s),
+                "lower2": clean_float(m - 2 * s),
+            }
+
+        return {
+            "dates": df_window["Date"].dt.strftime("%Y-%m-%d").tolist(),
+            "pe": {"values": [clean_float(v) for v in df_window["PE"]], "stats": get_stats("PE")},
+            "pb": {"values": [clean_float(v) for v in df_window["PB"]], "stats": get_stats("PB")},
+            "dy": {"values": [clean_float(v) for v in df_window["Div_Yield"]], "stats": get_stats("Div_Yield")},
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/nav-data")
+def get_nav_data(request: MetricsRequest):
+    if "rebased" not in DATA:
+        raise HTTPException(status_code=503)
+
+    effective_ed = get_effective_end_date(request.reference_date)
+    sd = get_start_date(request.periods[0], effective_ed)
+
+    valid_cols = [c for c in request.indices if c in DATA["rebased"].columns]
+    if request.benchmark and request.benchmark not in valid_cols:
+        valid_cols.append(request.benchmark)
+
+    df = (
+        DATA["rebased"][valid_cols]
+        .loc[(DATA["rebased"].index >= sd) & (DATA["rebased"].index <= effective_ed)]
+        .dropna(how="all")
+    )
+    if df.empty:
+        return []
+
+    if request.metric == "drawdown":
+        df = (df / df.cummax() - 1) * 100
+    else:
+        # Rebase each series to 100 at its first available point in the window
+        df = df.apply(
+            lambda col: col / col.dropna().iloc[0] * 100 if col.dropna().size > 0 else col
+        )
+
+    output = []
+    for col in df.columns:
+        s = df[col].dropna()
+        output.append({"x": s.index.strftime("%Y-%m-%d").tolist(), "y": s.values.tolist(), "name": col})
+    return output
+
+
+@app.post("/api/scatter-data")
+def get_scatter_data(request: MetricsRequest):
+    if "rebased" not in DATA:
+        return []
+
+    effective_ed = get_effective_end_date(request.reference_date)
+    sd = get_start_date(request.periods[0] if request.periods else "5 Yr", effective_ed)
+
+    valid_indices = [idx for idx in request.indices if idx in DATA["rebased"].columns]
+    if not valid_indices:
+        return []
+
+    cagrs = calc_cagr(DATA["rebased"], sd, effective_ed, valid_indices)
+    vols = calc_vol(DATA["returns"], sd, effective_ed, valid_indices)
+
+    return [
+        {"index": idx, "return": clean_float(cagrs.get(idx)), "risk": clean_float(vols.get(idx))}
+        for idx in valid_indices
+        if np.isfinite(cagrs.get(idx, np.nan)) and np.isfinite(vols.get(idx, np.nan))
+    ]
+
+
+@app.post("/api/rankings")
+def get_calendar_rankings(request: MetricsRequest):
+    if "yearly" not in DATA:
+        raise HTTPException(status_code=503)
+    try:
+        available_cols = [
+            c for c in DATA["yearly"].columns
+            if c.strip().upper() in [s.strip().upper() for s in request.indices]
+        ]
+        if not available_cols:
+            return []
+
+        rank_df = DATA["yearly"][available_cols].rank(axis=1, ascending=False, method="min")
+        results = []
+        for year, row in rank_df.iterrows():
+            item = {"Year": str(year).split("-")[0]}
+            valid = False
+            for idx_name, rnk in row.items():
+                if not np.isnan(rnk):
+                    item[f"Rank {int(rnk)}"] = idx_name
+                    valid = True
+            if valid:
+                results.append(item)
+        return results
+    except Exception:
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINT — Excel report generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_matplotlib_gauge(current, min_val, max_val, reverse=False):
+    """Creates a high-resolution linear gauge for Excel cells"""
+    try:
+        pos = (current - min_val) / (max_val - min_val) if max_val != min_val else 0.5
+        pos = max(0, min(1, pos))
+    except: pos = 0.5
+
+    fig, ax = plt.subplots(figsize=(4, 0.8))
+    cmap = "RdYlGn" if not reverse else "RdYlGn_r"
+    gradient = np.linspace(0, 1, 256).reshape(1, -1)
+    ax.imshow(gradient, aspect="auto", extent=[0, 1, 0, 0.25], cmap=cmap)
+    ax.scatter(pos, 0.35, marker="v", s=200, color="black", zorder=10)
+
+    txt_style = {'fontsize': 9, 'fontweight': 'bold'}
+    ax.text(0, 0.5, f"{min_val:.1f}", ha="left", color='#64748b', **txt_style)
+    ax.text(1, 0.5, f"{max_val:.1f}", ha="right", color='#64748b', **txt_style)
+    ax.text(pos, 0.1, f"{current:.1f}", ha="center", color='black', **txt_style)
+
+    ax.set_xlim(-0.05, 1.05); ax.set_ylim(-0.1, 0.7); ax.axis("off")
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.02, transparent=True, dpi=120)
+    plt.close(fig) 
+    buf.seek(0)
+    return buf
+
 
 @app.post("/api/generate-report")
 async def generate_report(request: MetricsRequest):
-    if 'rebased' not in DATA: raise HTTPException(503)
-    effective_ed = get_effective_end_date(request.reference_date)
-    output = io.BytesIO()
-    workbook = xlsxwriter.Workbook(output)
-
-    # --- FORMATS ---
-    title_f = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': 'black', 'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 12})
-    head_f = workbook.add_format({'bold': True, 'bg_color': '#F2F2F2', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 10})
-    text_f = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'font_size': 9})
-    num_f = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
-    perc_f = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
-    italic_f = workbook.add_format({'italic': True, 'font_size': 8, 'text_wrap': True})
-
-    def get_perf_row(idx, ed, periods):
-        results = []
-        for p in periods:
-            try:
-                if p == "Rolling 3-Yr Avg":
-                    val = calc_rolling3_metric(DATA['rebased'], DATA['returns'], 'cagr', [idx], request.benchmark, ed)[idx]
-                else:
-                    sd = get_start_date(p, ed)
-                    sd_calc = pd.Timestamp(f"{ed.year}-{ed.month:02d}-01") if p == "MTD" else (pd.Timestamp(f"{ed.year}-01-01") if p == "YTD" else sd)
-                    val = calc_cagr(DATA['rebased'], sd_calc, ed, [idx], label=p)[idx]
-                results.append(clean_float(val))
-            except: results.append(None)
-        return results
-
-    def get_val_row(idx, ed):
-        try:
-            latest = DATA['valuation'][(DATA['valuation']['Index_Name'] == idx) & (DATA['valuation']['Date'] <= ed)].iloc[-1]
-            return [clean_float(latest['PE']), clean_float(latest['PB']), clean_float(latest['Div_Yield'])]
-        except: return [None, None, None]
-
-    # --- SHEET 1: SECTOR & THEMATIC ---
-    ws1 = workbook.add_worksheet("Sector & Thematic")
-    ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
-    
-    # Define Column Order from request periods
-    col_headers = ["Thematic/Sector Indices"] + request.periods + ["P/E", "P/B", "DY"]
-    ws1.write_row('A2', col_headers, head_f)
-
-    row = 2
-    # Ensure Benchmark is first
-    indices = [request.benchmark] + [i for i in request.indices if i != request.benchmark]
-    
-    for idx in indices[:20]: # Follows your Row 22 limit
-        ws1.write(row, 0, idx, text_f)
-        ws1.write_row(row, 1, get_perf_row(idx, effective_ed, request.periods), perc_f)
-        # Offset depends on number of periods
-        ws1.write_row(row, 1 + len(request.periods), get_val_row(idx, effective_ed), num_f)
-        row += 1
-
-    # Row 23 Disclaimer
-    ws1.merge_range(22, 0, 24, 10, f"Source: www.niftyindices.com and ElevateWealth. Total Returns in INR for period ending {effective_ed.date()}. Rolling 3-Yr average returns calculated since Dec 2020. All returns annualized except < 1yr. Valuations calculated as of {effective_ed.date()}.", italic_f)
-
-    # --- SHEET 2: FACTOR DASHBOARD ---
-    ws2 = workbook.add_worksheet("Factor Dashboard")
-    ws2.merge_range('A1:K1', 'Factor Dashboard', title_f)
-    ws2.write_row('A2', ["Factor Indices"] + request.periods + ["Volatility", "Risk-Adj", "Max DD"], head_f)
-
-    row = 2
-    for idx in indices:
-        ws2.write(row, 0, idx, text_f)
-        ws2.write_row(row, 1, get_perf_row(idx, effective_ed, request.periods), perc_f)
+    if "rebased" not in DATA: raise HTTPException(503)
+    try:
+        ed = get_effective_end_date(request.reference_date)
+        five_yr = ed - pd.DateOffset(years=5)
+        output = io.BytesIO()
+        workbook = xlsxwriter.Workbook(output, {'in_memory': True})
         
-        # Risk Metrics (Since Inception)
-        try:
-            incept = DATA['rebased'][idx].dropna().index.min()
-            vol = calc_vol(DATA['returns'], incept, effective_ed, [idx])[idx]
-            mdd = calc_mdd(DATA['rebased'], incept, effective_ed, [idx])[idx]
-            ra = calc_cagr(DATA['rebased'], incept, effective_ed, [idx])[idx] / vol if vol else 0
-            ws2.write_row(row, 1 + len(request.periods), [clean_float(vol), clean_float(ra), clean_float(mdd)], num_f)
-        except: pass
-        row += 1
+        # Style Formats
+        title_f = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': 'black', 'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 12})
+        head_f = workbook.add_format({'bold': True, 'bg_color': '#F2F2F2', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
+        text_f = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'font_size': 9})
+        perc_f = workbook.add_format({'num_format': '0.0"%"', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
+        rank_f = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 8, 'text_wrap': True})
+        italic_f = workbook.add_format({'italic': True, 'font_size': 8, 'text_wrap': True})
 
-    # Write Ranking Table
-    row += 2
-    for r_idx, r_data in enumerate(FACTOR_RANKS_HISTORICAL):
-        ws2.write_row(row + r_idx, 0, r_data, text_f)
-    
-    workbook.close()
-    output.seek(0)
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=NSE_Report_{effective_ed.strftime('%Y%m%d')}.xlsx"})
+        # --- SHEET 1 ---
+        ws1 = workbook.add_worksheet("Sector Dashboard")
+        ws1.set_column('A:A', 35); ws1.set_column('B:H', 12); ws1.set_column('I:K', 25)
+        ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
+        ws1.merge_range('B2:H2', 'Performance (%)', head_f)
+        ws1.merge_range('I2:K2', 'Valuations (5Y Gauge)', head_f)
+        
+        indices = [request.benchmark] + [i for i in request.indices if i != request.benchmark]
+        ws1.write_row('A3', ["Indices"] + request.periods + ["P/E", "P/B", "DY"], head_f)
+        
+        row_idx = 3
+        num_periods = len(request.periods)
+
+        for idx in indices[:19]:
+            ws1.set_row(row_idx, 45)
+            ws1.write(row_idx, 0, idx, text_f)
+            # Performance
+            perf = get_perf_row_data(idx, ed, request.periods, request.benchmark)
+            ws1.write_row(row_idx, 1, perf, perc_f)
+            
+            # Gauge Logic
+            try:
+                if 'valuation' in DATA:
+                    # Robust lookup
+                    v_df = DATA['valuation']
+                    hist = v_df[(v_df['Index_Name'].str.upper() == idx.strip().upper()) & 
+                                (v_df['Date'] >= five_yr) & (v_df['Date'] <= ed)]
+                    
+                    if not hist.empty:
+                        for i, col in enumerate(['PE', 'PB', 'Div_Yield']):
+                            ser = hist[col].dropna()
+                            if not ser.empty:
+                                img_data = create_matplotlib_gauge(ser.iloc[-1], ser.min(), ser.max(), reverse=(col=='Div_Yield'))
+                                # Column offset: 1 (Index col) + number of periods
+                                ws1.insert_image(row_idx, 1 + num_periods + i, f"g1_{row_idx}_{i}.png", 
+                                               {'image_data': img_data, 'x_scale': 0.7, 'y_scale': 0.7, 'x_offset': 10, 'y_offset': 5})
+            except Exception as e:
+                logger.error(f"Image insert failed for {idx}: {e}")
+            row_idx += 1
+
+        ws1.merge_range(22, 0, 24, 10, f"Source: niftyindices.com. period ending {ed.date()}.", italic_f)
+
+        # Sector Rankings Matrix
+        years = [str(y) for y in range(2016, ed.year)] + [f"{ed.year} (YTD)"]
+        ws1.write(26, 0, "Ranking Matrix", workbook.add_format({'bold': True}))
+        for r, y_lab in enumerate(years):
+            curr_r = 27 + r
+            ws1.write(curr_r, 0, y_lab, head_f)
+            rets = calc_cagr(DATA['rebased'], pd.Timestamp(f"{ed.year}-01-01"), ed, indices, label="YTD") if "YTD" in y_lab else (DATA['yearly'].loc[y_lab, indices] if y_lab in DATA['yearly'].index else pd.Series())
+            top = rets.sort_values(ascending=False).head(6)
+            for i, (name, val) in enumerate(top.items()):
+                ws1.write(curr_r, i+1, f"{REPORT_SECTOR_MAP.get(name, name)}\n({val:.1f}%)", rank_f)
+
+        # --- SHEET 2 ---
+        ws2 = workbook.add_worksheet("Factor Dashboard")
+        ws2.set_column('A:A', 35); ws2.merge_range('A1:K1', 'Factor Dashboard', title_f)
+        ws2.write_row('A2', ["Factor Indices"] + request.periods + ["Volatility", "Risk-Adj", "Max DD"], head_f)
+        
+        f_row = 2
+        for idx in indices:
+            ws2.write(f_row, 0, idx, text_f)
+            ws2.write_row(f_row, 1, get_perf_row_data(idx, ed, request.periods, request.benchmark), perc_f)
+            f_row += 1
+        for i, rd in enumerate(FACTOR_RANKS_HISTORICAL):
+            ws2.write_row(f_row + 2 + i, 0, rd, text_f if i > 0 else head_f)
+
+        workbook.close(); output.seek(0)
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except Exception as e:
+        logger.error(f"Report Error: {e}")
+        raise HTTPException(500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-    # Use PORT env variable for Cloud Run, default to 8000 for local
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

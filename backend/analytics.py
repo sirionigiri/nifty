@@ -2,9 +2,6 @@ import pandas as pd
 import numpy as np
 import io
 
-# ── Constants (Copied directly from your script) ───────────────────────────
-# backend/analytics.py
-
 CATEGORY_MAP = {
     "Broad Market": [
         "NIFTY 100","NIFTY 200","NIFTY 50","NIFTY 500",

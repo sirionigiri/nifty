@@ -54,10 +54,12 @@ export function Sidebar() {
     const val = e.target.value;
     setInputValue(val);
     
-    // If user types a valid date (YYYY-MM-DD), update the global store automatically
     if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
         const date = new Date(val);
-        if (!isNaN(date.getTime())) {
+        const today = new Date();
+        
+        // FIX: Only update if the date is valid AND not in the future
+        if (!isNaN(date.getTime()) && date <= today) {
             setReferenceDate(val);
         }
     }
@@ -168,15 +170,14 @@ export function Sidebar() {
                   </PopoverTrigger>
                   <PopoverContent className="w-auto p-0 rounded-2xl shadow-2xl border-slate-200 dark:border-slate-800" align="start">
                     <Calendar
-                      
                       mode="single"
-                      // In v9, use 'dropdown' to show month/year selectors
-                      captionLayout="dropdown" 
-                      // You must provide these for the dropdowns to appear
-                      startMonth={new Date(2005, 0)} 
+                      captionLayout="dropdown"
+                      startMonth={new Date(2005, 0)}
                       endMonth={new Date()}
+                      // --- FIX: DISABLE FUTURE DATES ---
+                      disabled={{ after: new Date() }} 
                       selected={referenceDate ? new Date(referenceDate) : new Date()}
-                      onSelect={(date) => {
+                      onSelect={(date: Date | undefined) => {
                         if (date) {
                           setReferenceDate(format(date, "yyyy-MM-dd"));
                         }
