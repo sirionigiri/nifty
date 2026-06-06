@@ -348,51 +348,51 @@ def get_metrics_table(request: MetricsRequest):
 
 
 @app.post("/api/valuation-data")
-def get_valuation_data(request: MetricsRequest):
-    if "valuation" not in DATA:
-        raise HTTPException(status_code=503)
+def get_val_data(request: MetricsRequest):
+    if 'valuation' not in DATA: raise HTTPException(503)
     try:
         effective_ed = get_effective_end_date(request.reference_date)
-        df_full = DATA["valuation"]
+        df_full = DATA['valuation']
+        
+        # 1. Filter for Target Index
+        df = df_full[df_full['Index_Name'].str.upper() == request.benchmark.upper()].sort_values('Date')
+        if df.empty: return {"error": f"No data for {request.benchmark}"}
 
-        df = (
-            df_full[df_full["Index_Name"].str.strip().str.upper() == request.benchmark.strip().upper()]
-            .sort_values("Date")
-        )
-        if df.empty:
-            return {"error": f"No valuation data for {request.benchmark}"}
-
+        # 2. Slice the Window FIRST
         period = request.periods[0] if request.periods else "5 Yr"
         sd = get_start_date(period, effective_ed)
-        df_window = df[(df["Date"] >= sd) & (df["Date"] <= effective_ed)]
+        df_w = df[(df['Date'] >= sd) & (df['Date'] <= effective_ed)].copy()
 
-        if df_window.empty:
-            return {"error": "Insufficient data in window"}
+        if df_w.empty: return {"error": "Insufficient data in selected window"}
 
-        def get_stats(col):
-            """Compute long-term stats from the full historical series."""
-            series = df[col].dropna()
-            if series.empty:
-                return None
-            m, s = series.median(), series.std()
+        # 3. STATS HELPER (Now strictly using the windowed data)
+        def stats_for_window(s):
+            clean_s = s.dropna()
+            if clean_s.empty: return None
+            
+            # Recalculate Median and SD based ONLY on the current view
+            m, std = clean_s.median(), clean_s.std()
+            if not np.isfinite(std): std = 0
+            
             return {
-                "median": clean_float(m),
-                "upper4": clean_float(m + 4 * s),
-                "upper3": clean_float(m + 3 * s),
-                "upper2": clean_float(m + 2 * s),
-                "upper1": clean_float(m + s),
-                "lower1": clean_float(m - s),
-                "lower2": clean_float(m - 2 * s),
+                k: clean_float(v) for k, v in {
+                    "median": m, 
+                    "upper4": m + 4*std, "upper3": m + 3*std, 
+                    "upper2": m + 2*std, "upper1": m + std, 
+                    "lower1": m - std, "lower2": m - 2*std
+                }.items()
             }
-
+        
         return {
-            "dates": df_window["Date"].dt.strftime("%Y-%m-%d").tolist(),
-            "pe": {"values": [clean_float(v) for v in df_window["PE"]], "stats": get_stats("PE")},
-            "pb": {"values": [clean_float(v) for v in df_window["PB"]], "stats": get_stats("PB")},
-            "dy": {"values": [clean_float(v) for v in df_window["Div_Yield"]], "stats": get_stats("Div_Yield")},
+            "dates": df_w['Date'].dt.strftime('%Y-%m-%d').tolist(), 
+            "pe": {"values": [clean_float(v) for v in df_w['PE']], "stats": stats_for_window(df_w['PE'])}, 
+            "pb": {"values": [clean_float(v) for v in df_w['PB']], "stats": stats_for_window(df_w['PB'])}, 
+            "dy": {"values": [clean_float(v) for v in df_w['Div_Yield']], "stats": stats_for_window(df_w['Div_Yield'])}
         }
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/nav-data")

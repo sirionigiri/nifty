@@ -35,10 +35,21 @@ export function ReportModal() {
   
   // --- 💡 SEPARATE PRE-CHECKED LISTS ---
   const [sectorIndices, setSectorIndices] = useState<string[]>([
-    "NIFTY 500", "NIFTY ENERGY", "NIFTY AUTO", "NIFTY BANK", "NIFTY IT"
+    "NIFTY 500", "NIFTY ENERGY", "NIFTY AUTO", "NIFTY BANK", "NIFTY IT", "NIFTY METAL", "NIFTY CEMENT", 'NIFTY CHEMICALS', 'NIFTY FINSEREXBNK', 'NIFTY HEALTHCARE', 'NIFTY METAL', 'NIFTY REALTY', 'NIFTY CAPITAL MKT', 'NIFTY CPSE', 'NIFTY INDIA MFG', 'NIFTY IND TOURISM', 'NIFTY INFRA', 'NIFTY IPO', 'NIFTY MNC'
   ]);
   const [factorIndices, setFactorIndices] = useState<string[]>([
-    "NIFTY ALPHA 50", "NIFTY LOW VOL 50", "NIFTY QLTY LV 30"
+    "NIFTY500 QLTY50",
+    "NIFTY500 VALUE 50",
+    "NIFTY MULTI MQ 50",
+    "NIFTY500 MQVLV50",
+    "NIFTY200MOMENTM30",
+    "NIFTY200 QUALITY 30",
+    "NIFTY200 VALUE 30",
+    "NIFTY M150 QLTY50",
+    "NIFTYM150MOMNTM50",
+    "NIFTYSML250MQ 100",
+    "NIFTY SML250 Q50",
+    "NIFTY500MOMENTM50"
   ]);
 
   const { data: config } = useQuery<AppConfig>({

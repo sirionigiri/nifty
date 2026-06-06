@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import io
 
+# ── Global Configuration ───────────────────────────────────────────────────
 CATEGORY_MAP = {
     "Broad Market": [
         "NIFTY 100","NIFTY 200","NIFTY 50","NIFTY 500",
@@ -55,97 +56,100 @@ CATEGORY_MAP = {
     ],
 }
 
-PRESET_PERIODS = ["Last Week", "Last Month", "3 Month", "6 Month",  "YTD", "MTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "15 Yr", "20 Yr"]
 ROLL3_LABEL = "Rolling 3-Yr Avg"
 ABS_PERIODS = ["Last Week", "MTD", "Last Month", "3 Month", "6 Month", "YTD"]
 
-
-# ── Analytics helpers ─────────────────────────────────────────────────────
 def load_and_prepare(df_raw: pd.DataFrame) -> dict:
-    """
-    Loads raw CSV bytes, processes it, and returns a dictionary of key dataframes.
-    This is the main data ingestion and preparation function.
-    """
     df_raw['Date'] = pd.to_datetime(df_raw['Date'])
     df_raw = df_raw.sort_values(['Index_Name', 'Date'])
-    
     df_rb = df_raw.pivot(index='Date', columns='Index_Name', values='Total_Returns_Index')
     df_rb.index = pd.to_datetime(df_rb.index)
     df_rb = df_rb.sort_index()
-    
-    # Rebase each index to 100 at its own start date
+    # Rebase
     df_rb = df_rb.apply(lambda col: col / col.dropna().iloc[0] * 100 if col.dropna().size > 0 else col)
-    
-    df_ret = (df_rb.pct_change() * 100).round(4)
+    # Fix pct_change
+    df_ret = (df_rb.pct_change(fill_method=None).ffill() * 100).round(4)
     df_yr = _calc_yearly(df_rb)
-    
     return {
-        "rebased": df_rb, 
-        "returns": df_ret, 
-        "yearly": df_yr,
+        "rebased": df_rb, "returns": df_ret, "yearly": df_yr,
         "indices": sorted(df_raw['Index_Name'].unique().tolist()),
         "end_date": df_rb.index.max(),
     }
 
-def _get_last(df, date):
-    """Helper to get the last available row on or before a given date."""
-    sl = df.loc[:date]
-    return sl.iloc[-1] if not sl.empty else None
+def _get_last(df, target_date):
+    """Returns (Value/Series, ActualDateFound)"""
+    try:
+        # Find inception
+        valid_data = df.dropna()
+        if valid_data.empty: return None, None
+        inception_date = valid_data.index.min()
+        
+        # Fallback to inception if requested date is too early
+        if target_date < inception_date:
+            return df.loc[inception_date], inception_date
+        
+        # Use asof to find nearest trading day
+        found_date = df.index.asof(target_date)
+        if pd.isna(found_date):
+            return df.loc[inception_date], inception_date
+            
+        return df.loc[found_date], found_date
+    except:
+        return None, None
 
 def _calc_yearly(df):
-    """Calculates calendar year returns."""
     results = []
     years = sorted(df.index.year.unique())
     for i, y in enumerate(years):
         ed = pd.Timestamp(f"{y}-12-31")
-        ev = _get_last(df, ed)
+        ev, _ = _get_last(df, ed) # Unpack tuple
         if ev is None: continue
         
         if i == 0:
             sv = df.iloc[0]
             lbl = f"{df.index.min().strftime('%d/%m/%y')}-{ed.strftime('%d/%m/%y')}"
         else:
-            sv = _get_last(df, pd.Timestamp(f"{years[i-1]}-12-31"))
+            sv, _ = _get_last(df, pd.Timestamp(f"{years[i-1]}-12-31")) # Unpack tuple
             lbl = str(y)
             
-        ret = ev / sv - 1
+        if sv is None: continue
+        ret = (ev / sv - 1) * 100
         results.append({'Period': lbl, **ret.to_dict()})
         
     out = pd.DataFrame(results).set_index('Period')
-    nc = out.select_dtypes(include='number').columns
-    out[nc] = (out[nc] * 100).round(2)
-    return out
+    return out.round(2)
 
-def get_start_date(label, end_actual, slider_years=None):
-    """Calculates the start date for a given period label (e.g., "1 Yr", "YTD")."""
-    if label == "Last Week":  return end_actual - pd.Timedelta(days=7)
-    if label == "Last Month": return end_actual - pd.DateOffset(months=1)
-    if label == "3 Month":    return end_actual - pd.DateOffset(months=3)
-    if label == "6 Month":    return end_actual - pd.DateOffset(months=6)
-    if label == "YTD": return pd.Timestamp(f"{end_actual.year}-01-01") - pd.Timedelta(days=1)
+def get_start_date(label, end_actual):
+    if label == "Last Week": return end_actual - pd.Timedelta(days=7)
     if label == "MTD": return pd.Timestamp(f"{end_actual.year}-{end_actual.month:02d}-01")
+    if label == "Last Month": return end_actual - pd.DateOffset(months=1)
+    if label == "3 Month": return end_actual - pd.DateOffset(months=3)
+    if label == "6 Month": return end_actual - pd.DateOffset(months=6)
+    if label == "YTD": return pd.Timestamp(f"{end_actual.year}-01-01")
     if label == "1 Yr": return end_actual - pd.DateOffset(years=1)
     if label == "3 Yr": return end_actual - pd.DateOffset(years=3)
     if label == "5 Yr": return end_actual - pd.DateOffset(years=5)
     if label == "10 Yr": return end_actual - pd.DateOffset(years=10)
     if label == "15 Yr": return end_actual - pd.DateOffset(years=15)
     if label == "20 Yr": return end_actual - pd.DateOffset(years=20)
-    if label.endswith(" Yr") and slider_years is not None:
-        return end_actual - pd.DateOffset(years=slider_years)
     return end_actual - pd.DateOffset(years=20)
 
-# ── Point-in-time metric calculators ─────────────────────────────────────
 def calc_cagr(df_rb, sd, ed, cols, label=None):
-    sv = _get_last(df_rb[cols], sd)
-    ev = _get_last(df_rb[cols], ed)
-    if sv is None or ev is None: return pd.Series(np.nan, index=cols)
-    if label in ABS_PERIODS:
-        # ABSOLUTE RETURN FORMULA
-        return ((ev / sv) - 1).mul(100).round(2)
-    else:
-        yrs = (ev.name - sv.name).days / 365.25
-        if yrs <= 0: return pd.Series(np.nan, index=cols)
-        return ((ev / sv) ** (1/yrs) - 1).mul(100).round(2)
+    results = {}
+    for col in cols:
+        sv, actual_sd = _get_last(df_rb[col], sd)
+        ev, actual_ed = _get_last(df_rb[col], ed)
+        if sv is None or ev is None or sv == 0:
+            results[col] = np.nan
+            continue
+            
+        diff_days = (actual_ed - actual_sd).days
+        if diff_days < 360 or label in ABS_PERIODS:
+            results[col] = ((ev / sv) - 1) * 100
+        else:
+            yrs = diff_days / 365.25
+            results[col] = (((ev / sv) ** (1/yrs)) - 1) * 100
+    return pd.Series(results).round(2)
 
 def calc_vol(df_ret, sd, ed, cols):
     p = df_ret[cols].loc[(df_ret.index > sd) & (df_ret.index <= ed)]
@@ -155,6 +159,9 @@ def calc_mdd(df_rb, sd, ed, cols):
     out = {}
     for col in cols:
         s = df_rb[col].dropna().loc[:ed]
+        if s.empty: 
+            out[col] = np.nan
+            continue
         dd = s / s.cummax() - 1
         dw = dd.loc[(dd.index > sd) & (dd.index <= ed)]
         out[col] = round(dw.min() * 100, 2) if not dw.empty else np.nan
@@ -164,21 +171,21 @@ def calc_beta(df_ret, sd, ed, cols, bench):
     p = df_ret.loc[(df_ret.index > sd) & (df_ret.index <= ed)]
     out = {}
     for col in cols:
-        al = pd.concat([p[col], p[bench]], axis=1).dropna()
-        if al.shape[0] < 2:
+        if col not in p.columns or bench not in p.columns: 
             out[col] = np.nan
             continue
-        cov = al.iloc[:, 0].cov(al.iloc[:, 1])
-        var = al.iloc[:, 1].var()
+        al = pd.concat([p[col], p[bench]], axis=1).dropna()
+        if al.shape[0] < 2: out[col] = np.nan; continue
+        cov = al.iloc[:,0].cov(al.iloc[:,1]); var = al.iloc[:,1].var()
         out[col] = round(cov/var, 2) if var != 0 else np.nan
     return pd.Series(out)
 
 def calc_te(df_ret, sd, ed, cols, bench):
     p = df_ret.loc[(df_ret.index > sd) & (df_ret.index <= ed)]
+    if bench not in p.columns: return pd.Series(np.nan, index=cols)
     exc = p[cols].sub(p[bench], axis=0)
     return pd.Series(np.nan, index=cols) if exc.empty else (exc.std() * np.sqrt(250)).round(2)
 
-# ── Rolling 3-Yr Avg ───────────────────────────────────────────────────────
 def calc_rolling3_metric(df_rb, df_ret, metric, cols, bench, end_actual):
     latest_full_year = end_actual.year - 1
     year_results = []
@@ -195,36 +202,17 @@ def calc_rolling3_metric(df_rb, df_ret, metric, cols, bench, end_actual):
         year_results.append(r)
     return pd.DataFrame(year_results).mean().round(2)
 
-# ── Main Table Builder Function ───────────────────────────────────────────
-def build_table(df_rb, df_ret, metric, periods, cols, bench,
-                end_actual=None, custom_label=None, slider_years=None,
-                include_roll3=False):
-    """
-    The main orchestrator function. It builds a DataFrame of a specific metric
-    for given periods and indices. This is the primary function the API will call.
-    """
-    if not cols:
-        return pd.DataFrame()
-
+def build_table(df_rb, df_ret, metric, periods, cols, bench, end_actual, include_roll3=True):
     rows = {}
     for lbl in periods:
-        sl = slider_years if lbl == custom_label else None
-        sd = get_start_date(lbl, end_actual, slider_years=sl)
-        
-        # Ensure we only calculate for columns that exist in the dataframe
-        valid_cols = [c for c in cols if c in df_rb.columns and c in df_ret.columns]
-        if bench not in valid_cols:
-             valid_cols.append(bench) # ensure benchmark is available for calculation
-
+        sd = get_start_date(lbl, end_actual)
+        valid_cols = [c for c in cols if c in df_rb.columns]
         if not valid_cols: continue
-        
         if metric == 'cagr': rows[lbl] = calc_cagr(df_rb, sd, end_actual, valid_cols, label=lbl)
         elif metric == 'vol': rows[lbl] = calc_vol(df_ret, sd, end_actual, valid_cols)
         elif metric == 'mdd': rows[lbl] = calc_mdd(df_rb, sd, end_actual, valid_cols)
         elif metric == 'beta': rows[lbl] = calc_beta(df_ret, sd, end_actual, valid_cols, bench)
         elif metric == 'te': rows[lbl] = calc_te(df_ret, sd, end_actual, valid_cols, bench)
-    
-    if include_roll3 and end_actual is not None:
+    if include_roll3:
         rows[ROLL3_LABEL] = calc_rolling3_metric(df_rb, df_ret, metric, cols, bench, end_actual)
-    
     return pd.DataFrame(rows).T
