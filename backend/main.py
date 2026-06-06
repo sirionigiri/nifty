@@ -117,7 +117,7 @@ REPORT_SECTOR_MAP = {
 }
 
 # Static factor ranking table (2016–2025) written into the Excel Factor sheet
-FACTOR_RANKS_HISTORICAL = [
+FACTOR_RANKS_STATIC = [
     ["Rank", "2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025"],
     ["1", "Value", "Momentum", "Low Vol", "NIFTY 500", "Quality", "Momentum", "Value", "Value", "Momentum", "Value"],
     ["2", "NIFTY 500", "Equal Weight", "NIFTY 500", "Momentum", "Equal Weight", "Value", "Low Vol", "Momentum", "Quality", "Low Vol"],
@@ -483,123 +483,170 @@ def get_calendar_rankings(request: MetricsRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT — Excel report generation
 # ─────────────────────────────────────────────────────────────────────────────
-
-def create_matplotlib_gauge(current, min_val, max_val, reverse=False):
-    """Creates a high-resolution linear gauge for Excel cells"""
+def create_matplotlib_gauge(current, min_val, max_val, median_val, reverse=False):
+    """Creates a linear gauge with a Black Pointer and a Blue Median Line."""
     try:
+        # Normalize positions (0 to 1)
         pos = (current - min_val) / (max_val - min_val) if max_val != min_val else 0.5
+        pos_med = (median_val - min_val) / (max_val - min_val) if max_val != min_val else 0.5
         pos = max(0, min(1, pos))
-    except: pos = 0.5
+        pos_med = max(0, min(1, pos_med))
+    except: 
+        pos, pos_med = 0.5, 0.5
 
     fig, ax = plt.subplots(figsize=(4, 0.8))
+    
+    # 1. Draw Gradient Bar
     cmap = "RdYlGn" if not reverse else "RdYlGn_r"
     gradient = np.linspace(0, 1, 256).reshape(1, -1)
     ax.imshow(gradient, aspect="auto", extent=[0, 1, 0, 0.25], cmap=cmap)
-    ax.scatter(pos, 0.35, marker="v", s=200, color="black", zorder=10)
 
-    txt_style = {'fontsize': 9, 'fontweight': 'bold'}
+    # 2. Draw BLUE MEDIAN LINE (The new requirement)
+    ax.plot([pos_med, pos_med], [0, 0.25], color='#2563eb', linewidth=2.5, zorder=11, label="Median")
+
+    # 3. Draw CURRENT VALUE POINTER (Black Triangle)
+    ax.scatter(pos, 0.35, marker="v", s=200, color="black", zorder=12)
+
+    # 4. Add Text Labels
+    txt_style = {'fontsize': 9, 'fontweight': 'bold', 'family': 'sans-serif'}
     ax.text(0, 0.5, f"{min_val:.1f}", ha="left", color='#64748b', **txt_style)
     ax.text(1, 0.5, f"{max_val:.1f}", ha="right", color='#64748b', **txt_style)
     ax.text(pos, 0.1, f"{current:.1f}", ha="center", color='black', **txt_style)
+    # Add small blue label for median
+    ax.text(pos_med, 0.45, "MED", ha="center", color='#2563eb', fontsize=7, fontweight='black')
 
     ax.set_xlim(-0.05, 1.05); ax.set_ylim(-0.1, 0.7); ax.axis("off")
 
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.02, transparent=True, dpi=120)
-    plt.close(fig) 
+    plt.close(fig)
     buf.seek(0)
     return buf
 
-
 @app.post("/api/generate-report")
 async def generate_report(request: MetricsRequest):
-    if "rebased" not in DATA: raise HTTPException(503)
+    if "rebased" not in DATA: 
+        raise HTTPException(status_code=503, detail="Server data not loaded")
+    
     try:
-        ed = get_effective_end_date(request.reference_date)
-        five_yr = ed - pd.DateOffset(years=5)
+        effective_ed = get_effective_end_date(request.reference_date)
+        five_yrs_ago = effective_ed - pd.DateOffset(years=5)
+        
         output = io.BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
-        
-        # Style Formats
+
+        # --- FORMATS ---
         title_f = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': 'black', 'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 12})
         head_f = workbook.add_format({'bold': True, 'bg_color': '#F2F2F2', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
         text_f = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'font_size': 9})
         perc_f = workbook.add_format({'num_format': '0.0"%"', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
+        num_f = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
         rank_f = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 8, 'text_wrap': True})
         italic_f = workbook.add_format({'italic': True, 'font_size': 8, 'text_wrap': True})
 
-        # --- SHEET 1 ---
-        ws1 = workbook.add_worksheet("Sector Dashboard")
-        ws1.set_column('A:A', 35); ws1.set_column('B:H', 12); ws1.set_column('I:K', 25)
-        ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
-        ws1.merge_range('B2:H2', 'Performance (%)', head_f)
-        ws1.merge_range('I2:K2', 'Valuations (5Y Gauge)', head_f)
+        # --- CATEGORIZE INDICES ---
+        factor_list = CATEGORY_MAP.get("Strategy", []) + CATEGORY_MAP.get("Factor Indices", [])
+        s_indices = [idx for idx in request.indices if idx not in factor_list]
+        f_indices = [idx for idx in request.indices if idx in factor_list]
+        bench = request.benchmark if request.benchmark in DATA['rebased'].columns else "NIFTY 500"
         
-        indices = [request.benchmark] + [i for i in request.indices if i != request.benchmark]
-        ws1.write_row('A3', ["Indices"] + request.periods + ["P/E", "P/B", "DY"], head_f)
-        
-        row_idx = 3
+        # Ensure Benchmark is at the top of BOTH lists
+        if bench not in s_indices: s_indices.insert(0, bench)
+        if bench not in f_indices: f_indices.insert(0, bench)
         num_periods = len(request.periods)
 
-        for idx in indices[:19]:
+        # --- SHEET 1: SECTOR & THEMATIC ---
+        ws1 = workbook.add_worksheet("Sector Dashboard")
+        ws1.set_column('A:A', 35); ws1.set_column('B:M', 12); ws1.set_column('I:K', 25)
+        ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
+        
+        # Merge subheaders
+        ws1.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
+        ws1.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Valuations (5Y Linear Gauge)', head_f)
+        
+        headers1 = ["Indices"] + request.periods + ["P/E (5Y)", "P/B (5Y)", "DY (5Y)"]
+        ws1.write_row('A3', headers1, head_f)
+
+        row_idx = 3
+        for idx in s_indices[:19]:
             ws1.set_row(row_idx, 45)
             ws1.write(row_idx, 0, idx, text_f)
-            # Performance
-            perf = get_perf_row_data(idx, ed, request.periods, request.benchmark)
-            ws1.write_row(row_idx, 1, perf, perc_f)
-            
-            # Gauge Logic
+            # Perf
+            ws1.write_row(row_idx, 1, get_perf_row_data(idx, effective_ed, request.periods, bench), perc_f)
+            # Gauges (5Y Window)
             try:
-                if 'valuation' in DATA:
-                    # Robust lookup
-                    v_df = DATA['valuation']
-                    hist = v_df[(v_df['Index_Name'].str.upper() == idx.strip().upper()) & 
-                                (v_df['Date'] >= five_yr) & (v_df['Date'] <= ed)]
-                    
-                    if not hist.empty:
-                        for i, col in enumerate(['PE', 'PB', 'Div_Yield']):
-                            ser = hist[col].dropna()
-                            if not ser.empty:
-                                img_data = create_matplotlib_gauge(ser.iloc[-1], ser.min(), ser.max(), reverse=(col=='Div_Yield'))
-                                # Column offset: 1 (Index col) + number of periods
-                                ws1.insert_image(row_idx, 1 + num_periods + i, f"g1_{row_idx}_{i}.png", 
-                                               {'image_data': img_data, 'x_scale': 0.7, 'y_scale': 0.7, 'x_offset': 10, 'y_offset': 5})
-            except Exception as e:
-                logger.error(f"Image insert failed for {idx}: {e}")
+                val_df = DATA['valuation']
+                hist = val_df[(val_df['Index_Name'].str.upper() == idx.upper()) & (val_df['Date'] >= five_yrs_ago) & (val_df['Date'] <= effective_ed)]
+                if not hist.empty:
+                    for i, col in enumerate(['PE', 'PB', 'Div_Yield']):
+                        ser = hist[col].dropna()
+                        if not ser.empty:
+                            img = create_matplotlib_gauge(ser.iloc[-1], ser.min(), ser.max(), ser.median(), reverse=(col=='Div_Yield'))
+                            ws1.insert_image(row_idx, 1 + num_periods + i, f"s_{row_idx}_{i}.png", {'image_data': img, 'x_scale': 0.7, 'y_scale': 0.7, 'x_offset': 10, 'y_offset': 5})
+            except: pass
             row_idx += 1
 
-        ws1.merge_range(22, 0, 24, 10, f"Source: niftyindices.com. period ending {ed.date()}.", italic_f)
+        ws1.merge_range(22, 0, 24, 10, f"Source: niftyindices.com and ElevateWealth. Total Returns in INR for period ending {effective_ed.date()}. Rolling 3-Yr average returns calculated since Dec 2020. All returns annualized except < 1yr.", italic_f)
 
-        # Sector Rankings Matrix
-        years = [str(y) for y in range(2016, ed.year)] + [f"{ed.year} (YTD)"]
-        ws1.write(26, 0, "Ranking Matrix", workbook.add_format({'bold': True}))
+        # Sector Rankings (Bottom of Sheet 1)
+        ws1.write(26, 0, "Ranking Matrix (Sector)", workbook.add_format({'bold': True}))
+        years = [str(y) for y in range(2016, effective_ed.year)] + [f"{effective_ed.year} (YTD)"]
+        ws1.write_row(27, 0, ["Year"] + [f"Rank {i+1}" for i in range(6)], head_f)
         for r, y_lab in enumerate(years):
-            curr_r = 27 + r
+            curr_r = 28 + r
             ws1.write(curr_r, 0, y_lab, head_f)
-            rets = calc_cagr(DATA['rebased'], pd.Timestamp(f"{ed.year}-01-01"), ed, indices, label="YTD") if "YTD" in y_lab else (DATA['yearly'].loc[y_lab, indices] if y_lab in DATA['yearly'].index else pd.Series())
-            top = rets.sort_values(ascending=False).head(6)
-            for i, (name, val) in enumerate(top.items()):
+            rets = calc_cagr(DATA['rebased'], pd.Timestamp(f"{effective_ed.year}-01-01"), effective_ed, s_indices, label="YTD") if "YTD" in y_lab else (DATA['yearly'].loc[y_lab, s_indices] if y_lab in DATA['yearly'].index else pd.Series())
+            top_6 = rets.sort_values(ascending=False).head(6)
+            for i, (name, val) in enumerate(top_6.items()):
                 ws1.write(curr_r, i+1, f"{REPORT_SECTOR_MAP.get(name, name)}\n({val:.1f}%)", rank_f)
 
-        # --- SHEET 2 ---
+        # --- SHEET 2: FACTOR DASHBOARD ---
         ws2 = workbook.add_worksheet("Factor Dashboard")
-        ws2.set_column('A:A', 35); ws2.merge_range('A1:K1', 'Factor Dashboard', title_f)
-        ws2.write_row('A2', ["Factor Indices"] + request.periods + ["Volatility", "Risk-Adj", "Max DD"], head_f)
+        ws2.set_column('A:A', 35); ws2.set_column('B:M', 12)
+        ws2.merge_range('A1:K1', 'Factor Dashboard', title_f)
         
-        f_row = 2
-        for idx in indices:
-            ws2.write(f_row, 0, idx, text_f)
-            ws2.write_row(f_row, 1, get_perf_row_data(idx, ed, request.periods, request.benchmark), perc_f)
-            f_row += 1
-        for i, rd in enumerate(FACTOR_RANKS_HISTORICAL):
-            ws2.write_row(f_row + 2 + i, 0, rd, text_f if i > 0 else head_f)
+        # FIX: Updated Headers to mention Since Inception
+        ws2.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
+        ws2.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Risk Metrics (Since Inception)', head_f)
+        headers2 = ["Factor Indices"] + request.periods + ["Volatility (Incept)", "Risk-Adj (Incept)", "Max DD (Incept)"]
+        ws2.write_row('A3', headers2, head_f)
 
-        workbook.close(); output.seek(0)
-        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        row_idx = 3
+        for idx in f_indices:
+            ws2.write(row_idx, 0, idx, text_f)
+            ws2.write_row(row_idx, 1, get_perf_row_data(idx, effective_ed, request.periods, bench), perc_f)
+            # Since Inception Risk Metrics
+            try:
+                incept_date = DATA['rebased'][idx].dropna().index.min()
+                v_val = calc_vol(DATA['returns'], incept_date, effective_ed, [idx])[idx]
+                m_val = calc_mdd(DATA['rebased'], incept_date, effective_ed, [idx])[idx]
+                c_val = calc_cagr(DATA['rebased'], incept_date, effective_ed, [idx])[idx]
+                ra_val = c_val / v_val if v_val and v_val != 0 else 0
+                ws2.write_row(row_idx, 1 + num_periods, [clean_float(v_val), clean_float(ra_val), clean_float(m_val)], num_f)
+            except: pass
+            row_idx += 1
+
+        # Factor Ranking Matrix (Sheet 2)
+        row_idx += 2
+        ws2.write(row_idx, 0, "Ranking of Factor Portfolios", workbook.add_format({'bold': True}))
+        for r_idx, r_data in enumerate(FACTOR_RANKS_STATIC):
+            ws2.write_row(row_idx + 1 + r_idx, 0, r_data, head_f if r_idx == 0 else text_f)
+        
+        # Append dynamic 2026 YTD column for factors
+        y26_col = 20 
+        ws2.write(row_idx + 1, y26_col, f"{effective_ed.year} (YTD)", head_f)
+        f_ytd = calc_cagr(DATA['rebased'], pd.Timestamp(f"{effective_ed.year}-01-01"), effective_ed, f_indices, label="YTD").sort_values(ascending=False).head(6)
+        for i, (name, val) in enumerate(f_ytd.items()):
+             ws2.write(row_idx + 2 + i, y26_col, f"{name}\n({val:.1f}%)", rank_f)
+
+        workbook.close()
+        output.seek(0)
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=NSE_Report.xlsx"})
+
     except Exception as e:
-        logger.error(f"Report Error: {e}")
-        raise HTTPException(500, detail=str(e))
-
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
