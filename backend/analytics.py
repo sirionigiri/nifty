@@ -13,14 +13,7 @@ CATEGORY_MAP = {
         "NIFTY SMLCAP 50","NIFTY SMALLCAP 500","NIFTY TOTAL MKT",
         "NIFTY500 LMS EQL","NIFTY500 MULTICAP",
     ],
-    "Sectoral": [
-        "NIFTY AUTO","NIFTY BANK","NIFTY CEMENT","NIFTY CHEMICALS",
-        "NIFTY CONSR DURBL","NIFTY FIN SERVICE","NIFTY FINSRV25 50",
-        "NIFTY FINSEREXBNK","NIFTY FMCG","NIFTY HEALTHCARE","NIFTY IT",
-        "NIFTY MEDIA","NIFTY METAL","NIFTY MS FIN SERV","NIFTY MIDSML HLTH",
-        "NIFTY MS IT TELCM","NIFTY OIL AND GAS","NIFTY PHARMA",
-        "NIFTY PVT BANK","NIFTY PSU BANK","NIFTY REALTY","NIFTY500 HEALTH",
-    ],
+    
     "Strategy": [
         "NIFTY 50 ARBITRAGE","NIFTY ALPHA 50","NIFTY ALPHALOWVOL",
         "NIFTY AQL 30","NIFTY AQLV 30","NIFTY DIV OPPS 50","NIFTY GROWSECT 15",
@@ -37,6 +30,16 @@ CATEGORY_MAP = {
         "NIFTY500 LOWVOL50","NIFTY500MOMENTM50","NIFTY MULTI MQ 50",
         "NIFTY500 MQVLV50","NIFTY500 QLTY50","NIFTY500 VALUE 50",
     ],
+    
+    "Sectoral": [
+        "NIFTY AUTO","NIFTY BANK","NIFTY CEMENT","NIFTY CHEMICALS",
+        "NIFTY CONSR DURBL","NIFTY FIN SERVICE","NIFTY FINSRV25 50",
+        "NIFTY FINSEREXBNK","NIFTY FMCG","NIFTY HEALTHCARE","NIFTY IT",
+        "NIFTY MEDIA","NIFTY METAL","NIFTY MS FIN SERV","NIFTY MIDSML HLTH",
+        "NIFTY MS IT TELCM","NIFTY OIL AND GAS","NIFTY PHARMA",
+        "NIFTY PVT BANK","NIFTY PSU BANK","NIFTY REALTY","NIFTY500 HEALTH",
+    ],
+    
     "Thematic": [
         "NIFTY CAPITAL MKT","NIFTY COMMODITIES","NIFTY CONGLOMERATE 50",
         "NIFTY COREHOUSING","NIFTY CPSE","NIFTY ENERGY","NIFTY EV",
@@ -79,16 +82,21 @@ def load_and_prepare(df_raw: pd.DataFrame) -> dict:
 def _get_last(df, target_date):
     """Returns (Value/Series, ActualDateFound)"""
     try:
-        # Find inception
+        # DataFrame path: don't dropna across columns — each col has its own history
+        if isinstance(df, pd.DataFrame):
+            found_date = df.index.asof(target_date)
+            if pd.isna(found_date):
+                return None, None
+            return df.loc[found_date], found_date
+
+        # Series path (unchanged)
         valid_data = df.dropna()
         if valid_data.empty: return None, None
         inception_date = valid_data.index.min()
         
-        # Fallback to inception if requested date is too early
         if target_date < inception_date:
             return df.loc[inception_date], inception_date
         
-        # Use asof to find nearest trading day
         found_date = df.index.asof(target_date)
         if pd.isna(found_date):
             return df.loc[inception_date], inception_date

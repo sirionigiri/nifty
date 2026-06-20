@@ -35,6 +35,7 @@ from analytics import (
     calc_vol,
     get_start_date,
     load_and_prepare,
+    _get_last
 )
 
 
@@ -287,6 +288,8 @@ def get_metrics_table(request: MetricsRequest):
         all_cols = DATA["rebased"].columns.tolist()
         req_indices = [idx.strip().upper() for idx in request.indices]
         valid_indices = [c for c in all_cols if c.strip().upper() in req_indices]
+        
+        # Robust benchmark matching
         bench_match = next(
             (c for c in all_cols if c.strip().upper() == request.benchmark.strip().upper()),
             "NIFTY 50",
@@ -305,6 +308,7 @@ def get_metrics_table(request: MetricsRequest):
             include_roll3=(request.metric != "mdd"),
         )
 
+        # 1. RUN CALCULATIONS
         if request.metric == "exc":
             df_c = build_table(metric="cagr", **kw)
             df_res = df_c.sub(df_c[bench_match], axis=0)
@@ -318,7 +322,7 @@ def get_metrics_table(request: MetricsRequest):
         else:
             df_res = build_table(metric=request.metric, **kw)
 
-        # Build human-readable date range labels for each period row
+        # 2. BUILD DYNAMIC DATE RANGE LABELS (Metadata)
         ed_str = effective_ed.strftime("%d %b %y")
         date_ranges = {}
         for p in df_res.index:
@@ -326,15 +330,24 @@ def get_metrics_table(request: MetricsRequest):
                 yr = effective_ed.year - 1
                 date_ranges[p] = f"Jan {yr - 2} - Dec {yr}"
             else:
-                sd = get_start_date(p, effective_ed)
+                target_sd = get_start_date(p, effective_ed)
+                
+                # FIX: Check what date was actually used for the anchor (Benchmark)
+                # This unpacks the (Value, Date) tuple from our new _get_last
+                _, actual_sd = _get_last(DATA["rebased"][bench_match], target_sd)
+                
+                # Determine what to show in the UI label
                 if p == "MTD":
                     sd_show = pd.Timestamp(f"{effective_ed.year}-{effective_ed.month:02d}-01")
                 elif p == "YTD":
                     sd_show = pd.Timestamp(f"{effective_ed.year}-01-01")
                 else:
-                    sd_show = sd
+                    # If actual_sd is inception (newer than target), show inception date
+                    sd_show = actual_sd if actual_sd else target_sd
+                
                 date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
 
+        # 3. FORMAT FINAL RESPONSE
         df_res = df_res.reset_index().rename(columns={"index": "Period"})
         df_res["Range"] = df_res["Period"].map(date_ranges)
 
@@ -343,7 +356,8 @@ def get_metrics_table(request: MetricsRequest):
             "error": None,
         }
     except Exception as e:
-        logger.error(f"Metrics Error: {e}")
+        import traceback
+        logger.error(f"Metrics Error: {traceback.format_exc()}")
         return {"data": [], "error": str(e)}
 
 
@@ -454,29 +468,44 @@ def get_scatter_data(request: MetricsRequest):
 
 @app.post("/api/rankings")
 def get_calendar_rankings(request: MetricsRequest):
-    if "yearly" not in DATA:
-        raise HTTPException(status_code=503)
     try:
-        available_cols = [
-            c for c in DATA["yearly"].columns
-            if c.strip().upper() in [s.strip().upper() for s in request.indices]
-        ]
+        if 'yearly' not in DATA:
+            raise HTTPException(status_code=503)
+
+        # 1. Extreme Name Matching
+        all_cols = DATA['yearly'].columns.tolist()
+        # Clean names (remove hidden spaces) for matching
+        selected = [s.strip() for s in request.indices]
+        available_cols = [c for c in all_cols if c.strip() in selected]
+        
         if not available_cols:
             return []
 
-        rank_df = DATA["yearly"][available_cols].rank(axis=1, ascending=False, method="min")
+        # 2. Slice and calculate ranks
+        # method='min' handles ties better for rankings
+        df_selected = DATA['yearly'][available_cols].copy()
+        rank_df = df_selected.rank(axis=1, ascending=False, method='min')
+
         results = []
         for year, row in rank_df.iterrows():
-            item = {"Year": str(year).split("-")[0]}
-            valid = False
-            for idx_name, rnk in row.items():
-                if not np.isnan(rnk):
-                    item[f"Rank {int(rnk)}"] = idx_name
-                    valid = True
-            if valid:
+            # Standardize the year label
+            y_label = str(year).split('-')[0] # Get just "2007" if it's a timestamp
+            item = {"Year": y_label}
+            
+            # Map the ranks found in this row
+            valid_row = False
+            for idx_name, rank_val in row.items():
+                if not np.isnan(rank_val):
+                    item[f"Rank {int(rank_val)}"] = idx_name
+                    valid_row = True
+            
+            # Only add the year if there is at least one rank found
+            if valid_row:
                 results.append(item)
+
         return results
-    except Exception:
+    except Exception as e:
+        print(f"Rankings Error: {e}")
         return []
 
 
