@@ -134,6 +134,28 @@ FACTOR_RANKS_STATIC = [
 ]
 
 
+INTL_CURRENCY_MAP = {
+    "S&P 500": "USD",
+    "NIFTY 50": "INR",
+    "Nasdaq 100 Futures": "USD",
+    "KOSPI": "KRW",
+    "Shanghai Composite": "CNY",
+    "EEM": "USD",
+    "TAIEX": "TWD",
+    "Bovespa": "BRL",
+    "Mexico IPC": "MXP",
+    "S&P Europe 350": "EUR",
+    "Gold": "USD",
+    "Silver": "USD",
+    "Bitcoin": "USD"
+}
+
+INTL_REPORT_LIST = [
+    "S&P 500", "NIFTY 50", "Nasdaq 100 Futures", "KOSPI", "Shanghai Composite",
+    "EEM", "TAIEX", "Bovespa", "Mexico IPC", "S&P Europe 350", "Gold", "Silver", "Bitcoin"
+]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # REQUEST MODEL
 # ─────────────────────────────────────────────────────────────────────────────
@@ -623,7 +645,7 @@ async def generate_report(request: MetricsRequest):
         output = io.BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
 
-        # --- FORMATS ---
+        # --- STYLES ---
         title_f = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': 'black', 'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 12})
         head_f = workbook.add_format({'bold': True, 'bg_color': '#F2F2F2', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
         text_f = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'font_size': 9})
@@ -636,9 +658,8 @@ async def generate_report(request: MetricsRequest):
         factor_list = CATEGORY_MAP.get("Strategy", []) + CATEGORY_MAP.get("Factor Indices", [])
         s_indices = [idx for idx in request.indices if idx not in factor_list]
         f_indices = [idx for idx in request.indices if idx in factor_list]
-        bench = request.benchmark if request.benchmark in DATA['rebased'].columns else "NIFTY 500"
+        bench = request.benchmark if request.benchmark in DATA['rebased'].columns else "NIFTY 50"
         
-        # Ensure Benchmark is at the top of BOTH lists
         if bench not in s_indices: s_indices.insert(0, bench)
         if bench not in f_indices: f_indices.insert(0, bench)
         num_periods = len(request.periods)
@@ -647,36 +668,29 @@ async def generate_report(request: MetricsRequest):
         ws1 = workbook.add_worksheet("Sector Dashboard")
         ws1.set_column('A:A', 35); ws1.set_column('B:M', 12); ws1.set_column('I:K', 25)
         ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
-        
-        # Merge subheaders
         ws1.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
         ws1.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Valuations (5Y Linear Gauge)', head_f)
-        
-        headers1 = ["Indices"] + request.periods + ["P/E (5Y)", "P/B (5Y)", "DY (5Y)"]
-        ws1.write_row('A3', headers1, head_f)
+        ws1.write_row('A3', ["Indices"] + request.periods + ["P/E", "P/B", "DY"], head_f)
 
         row_idx = 3
         for idx in s_indices[:19]:
             ws1.set_row(row_idx, 45)
             ws1.write(row_idx, 0, idx, text_f)
-            # Perf
             ws1.write_row(row_idx, 1, get_perf_row_data(idx, effective_ed, request.periods, bench), perc_f)
-            # Gauges (5Y Window)
             try:
-                val_df = DATA['valuation']
-                hist = val_df[(val_df['Index_Name'].str.upper() == idx.upper()) & (val_df['Date'] >= five_yrs_ago) & (val_df['Date'] <= effective_ed)]
+                v_df = DATA['valuation']
+                hist = v_df[(v_df['Index_Name'].str.upper() == idx.upper()) & (v_df['Date'] >= five_yrs_ago) & (v_df['Date'] <= effective_ed)]
                 if not hist.empty:
                     for i, col in enumerate(['PE', 'PB', 'Div_Yield']):
                         ser = hist[col].dropna()
                         if not ser.empty:
                             img = create_matplotlib_gauge(ser.iloc[-1], ser.min(), ser.max(), ser.median(), reverse=(col=='Div_Yield'))
-                            ws1.insert_image(row_idx, 1 + num_periods + i, f"s_{row_idx}_{i}.png", {'image_data': img, 'x_scale': 0.7, 'y_scale': 0.7, 'x_offset': 10, 'y_offset': 5})
+                            ws1.insert_image(row_idx, 1 + num_periods + i, f"s1_{row_idx}_{i}.png", {'image_data': img, 'x_scale': 0.7, 'y_scale': 0.7, 'x_offset': 10, 'y_offset': 5})
             except: pass
             row_idx += 1
+        ws1.merge_range(22, 0, 24, 10, f"Source: niftyindices.com. End Date: {effective_ed.date()}. Rolling 3-Yr Avg since Dec 2020.", italic_f)
 
-        ws1.merge_range(22, 0, 24, 10, f"Source: niftyindices.com and ElevateWealth. Total Returns in INR for period ending {effective_ed.date()}. Rolling 3-Yr average returns calculated since Dec 2020. All returns annualized except < 1yr.", italic_f)
-
-        # Sector Rankings (Bottom of Sheet 1)
+        # Sector Rankings Matrix logic (Sheet 1 bottom)
         ws1.write(26, 0, "Ranking Matrix (Sector)", workbook.add_format({'bold': True}))
         years = [str(y) for y in range(2016, effective_ed.year)] + [f"{effective_ed.year} (YTD)"]
         ws1.write_row(27, 0, ["Year"] + [f"Rank {i+1}" for i in range(6)], head_f)
@@ -692,50 +706,65 @@ async def generate_report(request: MetricsRequest):
         ws2 = workbook.add_worksheet("Factor Dashboard")
         ws2.set_column('A:A', 35); ws2.set_column('B:M', 12)
         ws2.merge_range('A1:K1', 'Factor Dashboard', title_f)
-        
-        # FIX: Updated Headers to mention Since Inception
         ws2.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
         ws2.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Risk Metrics (Since Inception)', head_f)
-        headers2 = ["Factor Indices"] + request.periods + ["Volatility (Incept)", "Risk-Adj (Incept)", "Max DD (Incept)"]
-        ws2.write_row('A3', headers2, head_f)
+        ws2.write_row('A3', ["Factor Indices"] + request.periods + ["Volatility", "Risk-Adj", "Max DD"], head_f)
 
         row_idx = 3
         for idx in f_indices:
             ws2.write(row_idx, 0, idx, text_f)
             ws2.write_row(row_idx, 1, get_perf_row_data(idx, effective_ed, request.periods, bench), perc_f)
-            # Since Inception Risk Metrics
             try:
-                incept_date = DATA['rebased'][idx].dropna().index.min()
-                v_val = calc_vol(DATA['returns'], incept_date, effective_ed, [idx])[idx]
-                m_val = calc_mdd(DATA['rebased'], incept_date, effective_ed, [idx])[idx]
-                c_val = calc_cagr(DATA['rebased'], incept_date, effective_ed, [idx])[idx]
+                incept = DATA['rebased'][idx].dropna().index.min()
+                v_val = calc_vol(DATA['returns'], incept, effective_ed, [idx])[idx]
+                m_val = calc_mdd(DATA['rebased'], incept, effective_ed, [idx])[idx]
+                c_val = calc_cagr(DATA['rebased'], incept, effective_ed, [idx])[idx]
                 ra_val = c_val / v_val if v_val and v_val != 0 else 0
                 ws2.write_row(row_idx, 1 + num_periods, [clean_float(v_val), clean_float(ra_val), clean_float(m_val)], num_f)
             except: pass
             row_idx += 1
 
-        # Factor Ranking Matrix (Sheet 2)
+        # Factor Ranking Table logic (Sheet 2 bottom)
         row_idx += 2
         ws2.write(row_idx, 0, "Ranking of Factor Portfolios", workbook.add_format({'bold': True}))
-        for r_idx, r_data in enumerate(FACTOR_RANKS_STATIC):
-            ws2.write_row(row_idx + 1 + r_idx, 0, r_data, head_f if r_idx == 0 else text_f)
-        
-        # Append dynamic 2026 YTD column for factors
-        y26_col = 20 
-        ws2.write(row_idx + 1, y26_col, f"{effective_ed.year} (YTD)", head_f)
+        for i, rd in enumerate(FACTOR_RANKS_STATIC): ws2.write_row(row_idx + 1 + i, 0, rd, text_f if i > 0 else head_f)
+        y26_col = 20; ws2.write(row_idx + 1, y26_col, f"{effective_ed.year} (YTD)", head_f)
         f_ytd = calc_cagr(DATA['rebased'], pd.Timestamp(f"{effective_ed.year}-01-01"), effective_ed, f_indices, label="YTD").sort_values(ascending=False).head(6)
-        for i, (name, val) in enumerate(f_ytd.items()):
-             ws2.write(row_idx + 2 + i, y26_col, f"{name}\n({val:.1f}%)", rank_f)
+        for i, (name, val) in enumerate(f_ytd.items()): ws2.write(row_idx + 2 + i, y26_col, f"{name}\n({val:.1f}%)", rank_f)
+
+        # --- 🚀 SHEET 3: INTERNATIONAL MARKETS DASHBOARD ---
+        ws3 = workbook.add_worksheet("International Dashboard")
+        ws3.set_column('A:A', 35); ws3.set_column('B:B', 12); ws3.set_column('C:I', 14)
+        ws3.merge_range('A1:I1', 'International Markets Dashboard', title_f)
+        
+        intl_headers = ["Asset/Index", "currency", "MTD", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "Rolling 3Yr Average"]
+        ws3.write_row('A2', intl_headers, head_f)
+
+        row_idx = 2
+        fixed_periods = ["MTD", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "Rolling 3-Yr Avg"]
+        
+        # Using the Master list we defined above
+        for item in INTL_REPORT_LIST:
+            # Match the item name with what's in your Parquet
+            match = next((c for c in DATA['rebased'].columns if c.upper() in item.upper()), None)
+            if match:
+                ws3.write(row_idx, 0, item, text_f)
+                ws3.write(row_idx, 1, INTL_CURRENCY_MAP.get(match, "USD"), text_f)
+                # Performance row
+                perf = get_perf_row_data(match, effective_ed, fixed_periods, request.benchmark)
+                ws3.write_row(row_idx, 2, perf, perc_f)
+                row_idx += 1
 
         workbook.close()
         output.seek(0)
-        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=NSE_Report.xlsx"})
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=NSE_Advanced_Report.xlsx"})
 
     except Exception as e:
         import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"REPORT ERROR: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
-
+    
+    
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
