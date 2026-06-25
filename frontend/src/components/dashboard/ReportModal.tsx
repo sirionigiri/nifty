@@ -29,7 +29,8 @@ export function ReportModal() {
   const [activeTab, setActiveTab] = useState("sector"); // Track which tab is open
   const [isDownloading, setIsDownloading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [repDate, setRepDate] = useState(referenceDate);
+  const [repDate, setRepDate] = useState(referenceDate ?? format(new Date(), "yyyy-MM-dd"));
+
   const [repBench, setRepBench] = useState("NIFTY 500");
   const [repPeriods, setRepPeriods] = useState<string[]>([...PRESET_REPORT_PERIODS]);
   

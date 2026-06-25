@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import List, Optional
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 
 # ── Internal ──────────────────────────────────────────────────────────────────
 from analytics import (
@@ -594,42 +595,142 @@ def get_calendar_rankings(request: MetricsRequest):
 # ENDPOINT — Excel report generation
 # ─────────────────────────────────────────────────────────────────────────────
 def create_matplotlib_gauge(current, min_val, max_val, median_val, reverse=False):
-    """Creates a linear gauge with a Black Pointer and a Blue Median Line."""
+    """Creates a linear gauge with a black pointer and blue median line."""
+
     try:
         # Normalize positions (0 to 1)
         pos = (current - min_val) / (max_val - min_val) if max_val != min_val else 0.5
         pos_med = (median_val - min_val) / (max_val - min_val) if max_val != min_val else 0.5
+
         pos = max(0, min(1, pos))
         pos_med = max(0, min(1, pos_med))
-    except: 
+    except Exception:
         pos, pos_med = 0.5, 0.5
 
     fig, ax = plt.subplots(figsize=(4, 0.8))
-    
-    # 1. Draw Gradient Bar
+
+    # Gradient bar
     cmap = "RdYlGn_r" if not reverse else "RdYlGn"
+    cmap_obj = plt.get_cmap(cmap)
+
     gradient = np.linspace(0, 1, 256).reshape(1, -1)
-    ax.imshow(gradient, aspect="auto", extent=[0, 1, 0, 0.25], cmap=cmap)
+    ax.imshow(
+        gradient,
+        aspect="auto",
+        extent=[0, 1, 0, 0.25],
+        cmap=cmap_obj,
+    )
 
-    # 2. Draw BLUE MEDIAN LINE (The new requirement)
-    ax.plot([pos_med, pos_med], [0, 0.25], color='#2563eb', linewidth=2.5, zorder=11, label="Median")
+    # Median line
+    ax.plot(
+        [pos_med, pos_med],
+        [0, 0.25],
+        color="#2563eb",
+        linewidth=2.5,
+        zorder=11,
+    )
 
-    # 3. Draw CURRENT VALUE POINTER (Black Triangle)
-    ax.scatter(pos, 0.35, marker="v", s=200, color="black", zorder=12)
+    # Current value pointer
+    ax.scatter(
+        pos,
+        0.35,
+        marker="v",
+        s=200,
+        color="black",
+        zorder=12,
+    )
 
-    # 4. Add Text Labels
-    txt_style = {'fontsize': 9, 'fontweight': 'bold', 'family': 'sans-serif'}
-    ax.text(0, 0.5, f"{min_val:.1f}", ha="left", color='#64748b', **txt_style)
-    ax.text(1, 0.5, f"{max_val:.1f}", ha="right", color='#64748b', **txt_style)
-    ax.text(pos, 0.1, f"{current:.1f}", ha="center", color='black', **txt_style)
-    # Add small blue label for median
-    ax.text(pos_med, 0.45, "MED", ha="center", color='#2563eb', fontsize=7, fontweight='black')
+    txt_style = {
+        "fontsize": 9,
+        "fontweight": "bold",
+        "family": "sans-serif",
+    }
 
-    ax.set_xlim(-0.05, 1.05); ax.set_ylim(-0.1, 0.7); ax.axis("off")
+    # Min / Max labels
+    ax.text(
+        0,
+        0.5,
+        f"{min_val:.1f}",
+        ha="left",
+        color="#64748b",
+        **txt_style,
+    )
+
+    ax.text(
+        1,
+        0.5,
+        f"{max_val:.1f}",
+        ha="right",
+        color="#64748b",
+        **txt_style,
+    )
+
+    # Determine background brightness at current position
+    bg_rgb = cmap_obj(pos)[:3]
+    luminance = (
+        0.2126 * bg_rgb[0]
+        + 0.7152 * bg_rgb[1]
+        + 0.0722 * bg_rgb[2]
+    )
+
+    text_color = "black" if luminance > 0.55 else "white"
+    outline_color = "white" if text_color == "black" else "black"
+
+    # Current value label
+    current_text = ax.text(
+        pos,
+        0.1,
+        f"{current:.1f}",
+        ha="center",
+        va="center",
+        color=text_color,
+        zorder=20,
+        **txt_style,
+    )
+
+    current_text.set_path_effects([
+        pe.withStroke(
+            linewidth=2,
+            foreground=outline_color,
+        )
+    ])
+
+    # Median label
+    med_text = ax.text(
+        pos_med,
+        0.45,
+        "MED",
+        ha="center",
+        color="#2563eb",
+        fontsize=7,
+        fontweight="black",
+        zorder=20,
+    )
+
+    med_text.set_path_effects([
+        pe.withStroke(
+            linewidth=1.5,
+            foreground="white",
+        )
+    ])
+
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.1, 0.7)
+    ax.axis("off")
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.02, transparent=True, dpi=120)
+
+    plt.savefig(
+        buf,
+        format="png",
+        bbox_inches="tight",
+        pad_inches=0.02,
+        transparent=True,
+        dpi=120,
+    )
+
     plt.close(fig)
+
     buf.seek(0)
     return buf
 
@@ -666,7 +767,7 @@ async def generate_report(request: MetricsRequest):
 
         # --- SHEET 1: SECTOR & THEMATIC ---
         ws1 = workbook.add_worksheet("Sector Dashboard")
-        ws1.set_column('A:A', 35); ws1.set_column('B:M', 12); ws1.set_column('I:K', 25)
+        ws1.set_column('A:A', 35); ws1.set_column('B:M', 12); ws1.set_column('I:K', 32)
         ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
         ws1.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
         ws1.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Valuations (5Y Linear Gauge)', head_f)
@@ -728,7 +829,7 @@ async def generate_report(request: MetricsRequest):
         row_idx += 2
         ws2.write(row_idx, 0, "Ranking of Factor Portfolios", workbook.add_format({'bold': True}))
         for i, rd in enumerate(FACTOR_RANKS_STATIC): ws2.write_row(row_idx + 1 + i, 0, rd, text_f if i > 0 else head_f)
-        y26_col = 20; ws2.write(row_idx + 1, y26_col, f"{effective_ed.year} (YTD)", head_f)
+        y26_col = 11; ws2.write(row_idx + 1, y26_col, f"{effective_ed.year} (YTD)", head_f)
         f_ytd = calc_cagr(DATA['rebased'], pd.Timestamp(f"{effective_ed.year}-01-01"), effective_ed, f_indices, label="YTD").sort_values(ascending=False).head(6)
         for i, (name, val) in enumerate(f_ytd.items()): ws2.write(row_idx + 2 + i, y26_col, f"{name}\n({val:.1f}%)", rank_f)
 
