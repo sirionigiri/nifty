@@ -16,8 +16,8 @@ import { LoadingSpinner } from "@/components/ui/LoadingSpinner"
 import { API_BASE_URL } from "@/lib/utils"
 import { toast } from "sonner" 
 
-export function MetricSection({ title, metric, chartLabel, colorMode = "categorical" }: any) {
-  const { selectedIndices, benchmark, periods, referenceDate } = useStore();
+export function MetricSection({ title, metric, chartLabel, colorMode = "categorical", forcedIndices = null }: any) {
+  const { selectedIndices: sidebarIndices, benchmark, periods, referenceDate } = useStore();
   const [zoomEnabled, setZoomEnabled] = useState(false);
   
   const searchParams = useSearchParams()
@@ -27,46 +27,52 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
   const periodKey = `${metric}_p`
   const activePeriodFromUrl = searchParams.get(periodKey)
 
+  // 🚀 LOGIC: Use forced list (for International tab) or sidebar selection
+  const targetIndices = useMemo(() => {
+    const baseList = forcedIndices || sidebarIndices;
+    // Always ensure the benchmark is part of the requested data for comparison
+    return Array.from(new Set([benchmark, ...baseList]));
+  }, [forcedIndices, sidebarIndices, benchmark]);
+
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["metrics", metric, selectedIndices, benchmark, periods, referenceDate],
+    queryKey: ["metrics", metric, targetIndices, benchmark, periods, referenceDate],
     queryFn: async () => {
       const res = await fetch(`${API_BASE_URL}/api/metrics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metric, periods, indices: selectedIndices, benchmark, reference_date: referenceDate })
+        body: JSON.stringify({ 
+            metric, 
+            periods, 
+            indices: targetIndices, 
+            benchmark, 
+            reference_date: referenceDate 
+        })
       });
       
-      // If server returns 500, throw error to trigger isError
       if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.detail || "Internal Server Error");
       }
       return res.json();
     },
-    enabled: selectedIndices.length > 0,
+    enabled: targetIndices.length > 0,
     placeholderData: (prev) => prev,
-    retry: 1, // Only retry once to avoid spamming a broken index
+    retry: 1,
   });
 
   // --- ERROR MONITORING ---
   useEffect(() => {
     if (isError) {
-      toast.error(`Connection Error: ${title}`, {
-        description: "The server crashed or index data is missing. Retrying...",
-      });
+      toast.error(`Connection Error: ${title}`);
     }
-    // Handle cases where server returns 200 but with an error key
     if (data && (data as any).error) {
-      toast.error(`Calculation Error: ${title}`, {
-        description: (data as any).error,
-      });
+      toast.error(`Calculation Error: ${title}`, { description: (data as any).error });
     }
   }, [isError, data, title]);
 
   // --- DATA NORMALIZATION ---
   const rows = useMemo(() => {
     let rawRows = [];
-    // Handle if data is a direct array or wrapped in { data: [], error: null }
     if (Array.isArray(data)) rawRows = data;
     else if (data && typeof data === 'object' && Array.isArray((data as any).data)) {
         rawRows = (data as any).data;
@@ -74,14 +80,12 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
         return [];
     }
 
-    // Filter out Rolling 3-Yr Avg for Max Drawdown
     if (metric === "mdd") {
       return rawRows.filter((r: any) => r.Period !== "Rolling 3-Yr Avg");
     }
     return rawRows;
   }, [data, metric]);
 
-  // Handle active period state and fallbacks
   const activePeriod = useMemo(() => {
     if (rows.length === 0) return "1 Yr";
     const exists = rows.some((r: any) => r.Period === activePeriodFromUrl);
@@ -110,25 +114,16 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
       .filter(d => d.value !== null && d.value !== undefined);
   }, [rows, activePeriod]);
 
-  // --- LOADING RENDER ---
   if (isLoading && !data) {
     return (
-      <div className="w-full py-20 border-b border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center gap-6">
+      <div className="w-full py-20 border-b border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center gap-6 text-center">
         <LoadingSpinner />
         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-center">Calculating {title}...</p>
       </div>
     );
   }
 
-  // --- ERROR FALLBACK RENDER ---
-  if (rows.length === 0) {
-      return (
-          <div className="py-10 border-b text-center space-y-2 opacity-50">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Section Unavailable: {title}</p>
-              <p className="text-[9px] font-bold text-slate-500 uppercase italic">Check console for error details or deselect problematic indices</p>
-          </div>
-      );
-  }
+  if (rows.length === 0) return null;
 
   const columns = Object.keys(rows[0])
     .filter(key => key !== 'Range')
@@ -143,13 +138,13 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
         const val = row.getValue(key);
         const range = row.original.Range;
         if (key === 'Period') {
-            const isAbs = ["Last Week", "MTD", "Last Month", "3 Month", "6 Month", "YTD"].includes(val);
+            const isAbs = ["Last Week", "MTD", "Last Month", "3 Month", "6 Month", "YTD"].includes(val as string);
             return (
               <div className="p-3 flex flex-col leading-tight whitespace-nowrap text-left">
                 <div className="flex items-center gap-2">
                   <span className="font-bold text-slate-700 dark:text-slate-200">{val as string}</span>
                   {isAbs && metric === 'cagr' && (
-                    <span className="text-[8px] bg-slate-100 dark:bg-slate-800 px-1 rounded text-slate-500 font-black">ABS</span>
+                    <span className="text-[8px] bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded-[4px] text-slate-500 font-black border border-slate-200 dark:border-slate-700 shadow-sm">ABS</span>
                   )}
                 </div>
                 {range && <span className="text-[9px] text-slate-400 font-medium mt-0.5 tabular-nums">{range}</span>}
@@ -232,19 +227,19 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
                     <p className="text-[10px] text-slate-500 mt-2 font-bold uppercase">{activePeriod}</p>
                   </div>
                   <div className="bg-slate-50 dark:bg-slate-900 p-6 rounded-2xl border border-slate-100 dark:border-slate-800 flex flex-col justify-center shadow-sm">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Spread (Max - Min)</p>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Spread</p>
                     <p className="text-3xl font-mono font-black text-slate-700 dark:text-slate-200">{Math.abs(maxVal - minVal).toFixed(2)}</p>
                     <p className="text-[10px] text-slate-500 mt-2 font-bold uppercase">Delta</p>
                   </div>
                   <div className="bg-green-50 dark:bg-green-950/30 p-6 rounded-2xl border border-green-100 dark:border-green-900/50 flex flex-col justify-center shadow-sm">
                     <p className="text-[10px] font-bold text-green-600/70 dark:text-green-500/70 uppercase tracking-widest mb-1">Highest Value</p>
                     <p className="text-3xl font-mono font-black text-green-600 dark:text-green-500">{maxVal.toFixed(2)}</p>
-                    <p className="text-[10px] text-green-700/70 dark:text-green-400/70 mt-2 font-black truncate" title={bestIndex}>{bestIndex}</p>
+                    <p className="text-[10px] text-green-700/70 dark:text-green-400/70 mt-2 font-black truncate uppercase" title={bestIndex}>{bestIndex}</p>
                   </div>
                   <div className="bg-red-50 dark:bg-red-950/30 p-6 rounded-2xl border border-red-100 dark:border-red-900/50 flex flex-col justify-center shadow-sm">
                     <p className="text-[10px] font-bold text-red-600/70 dark:text-red-500/70 uppercase tracking-widest mb-1">Lowest Value</p>
                     <p className="text-3xl font-mono font-black text-red-600 dark:text-red-500">{minVal.toFixed(2)}</p>
-                    <p className="text-[10px] text-red-700/70 dark:text-red-400/70 mt-2 font-black truncate" title={worstIndex}>{worstIndex}</p>
+                    <p className="text-[10px] text-red-700/70 dark:text-red-400/70 mt-2 font-black truncate uppercase" title={worstIndex}>{worstIndex}</p>
                   </div>
                </motion.div>
             </TabsContent>

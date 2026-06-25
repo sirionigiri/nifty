@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 # ── Internal ──────────────────────────────────────────────────────────────────
 from analytics import (
     CATEGORY_MAP,
+    _calc_yearly,
     build_table,
     calc_beta,
     calc_cagr,
@@ -38,6 +39,7 @@ from analytics import (
     _get_last
 )
 
+URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/international_data.parquet"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
@@ -62,8 +64,11 @@ app.add_middleware(
 )
 
 
+
 class CacheControlMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS":          # ← let preflight pass through
+            return await call_next(request)
         response = await call_next(request)
         if request.method == "GET" and "/api/" in request.url.path:
             response.headers["Cache-Control"] = "public, max-age=3600"
@@ -92,7 +97,7 @@ URL_RETURNS = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/m
 URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/valuation_data.parquet"
 
 # In-memory data store populated at startup
-DATA: dict = {}
+DATA = {}
 
 # Maps index names to human-readable sector/type labels used in the Excel report
 REPORT_SECTOR_MAP = {
@@ -189,29 +194,84 @@ def clean_float(val) -> Optional[float]:
 # STARTUP — load data into memory
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @app.on_event("startup")
 async def startup_event():
     async with httpx.AsyncClient() as client:
         try:
-            logger.info("📡 Loading Index Returns...")
-            r1 = await client.get(URL_RETURNS, timeout=60)
-            df_returns = pd.read_parquet(io.BytesIO(r1.content))
-            df_returns.columns = [c.strip() for c in df_returns.columns]
-            prep = load_and_prepare(df_returns)
-            DATA.update(prep)
+            # 1. Load NIFTY Returns (Long format: Date, Index_Name, Total_Returns_Index)
+            logger.info("📡 Loading NIFTY Data...")
+            res1 = await client.get(URL_RETURNS, timeout=60)
+            df_nifty_raw = pd.read_parquet(io.BytesIO(res1.content))
+            
+            # Ensure Nifty Date is datetime and handle whitespace
+            df_nifty_raw['Date'] = pd.to_datetime(df_nifty_raw['Date'])
+            df_nifty_raw.columns = [c.strip() for c in df_nifty_raw.columns]
+            
+            # Use your existing prep engine to get the "Wide" rebased Nifty dataframe
+            prep = load_and_prepare(df_nifty_raw)
+            nifty_wide = prep['rebased'] # This has Date as Index
+            
+            # 2. Load International Data (Wide format: Date is Index)
+            logger.info("📡 Loading International Data...")
+            res_intl = await client.get(URL_INTL, timeout=60)
+            if res_intl.status_code == 200:
+                df_intl_raw = pd.read_parquet(io.BytesIO(res_intl.content))
+                
+                # If 'Ticker' is a level name (multi-index), flatten it
+                if isinstance(df_intl_raw.columns, pd.MultiIndex):
+                    df_intl_raw.columns = df_intl_raw.columns.get_level_values(-1)
+                
+                # Ensure the index (Date) is datetime
+                df_intl_raw.index = pd.to_datetime(df_intl_raw.index)
+                df_intl_raw.index.name = 'Date'
+                
+                # Rebase International Indices to 100 at their own inception
+                df_intl_rebased = df_intl_raw.apply(
+                    lambda col: col / col.dropna().iloc[0] * 100 if col.dropna().size > 0 else col
+                )
+                
+                # 3. MERGE Nifty Wide + International Wide
+                # concat(axis=1) joins them side-by-side on the Date index
+                combined_wide = pd.concat([nifty_wide, df_intl_rebased], axis=1).sort_index()
+                combined_wide = combined_wide.loc[:, ~combined_wide.columns.duplicated()].copy()
 
+                
+                # Fill weekend/holiday gaps so indices are comparable on any given day
+                combined_wide = combined_wide.ffill()
+                
+                logger.info("✅ Data merged successfully.")
+            else:
+                combined_wide = nifty_wide
+                logger.warning("⚠️ Intl data fetch failed. Using Nifty only.")
+
+            # 4. Finalize global store
+            DATA['rebased'] = combined_wide
+            # Calculate returns for all indices (needed for Vol/Beta)
+            DATA['returns'] = (combined_wide.pct_change(fill_method=None).ffill() * 100).round(4)
+            # Calculate yearly and metadata
+            DATA['yearly']  = _calc_yearly(combined_wide)
+            DATA['end_date'] = combined_wide.index.max()
+            DATA['indices'] = sorted(combined_wide.columns.tolist())
+
+            # 5. Load Valuations
             logger.info("📡 Loading Valuation Data...")
-            r2 = await client.get(URL_VALUATION, timeout=60)
-            if r2.status_code == 200:
-                df_v = pd.read_parquet(io.BytesIO(r2.content))
-                # CRITICAL: Strip names and ensure Date type for matching
-                df_v['Index_Name'] = df_v['Index_Name'].str.strip()
+            res2 = await client.get(URL_VALUATION, timeout=60)
+            if res2.status_code == 200:
+                df_v = pd.read_parquet(io.BytesIO(res2.content))
+                # Ensure Valuation Date is also clean
+                if 'Date' not in df_v.columns and df_v.index.name == 'Date':
+                    df_v = df_v.reset_index()
                 df_v['Date'] = pd.to_datetime(df_v['Date'])
+                df_v['Index_Name'] = df_v['Index_Name'].astype(str).str.strip()
                 DATA["valuation"] = df_v
             
-            logger.info("✅ BACKEND ENGINE READY")
+            logger.info(f"🚀 ENGINE READY: {len(DATA['indices'])} Assets Loaded.")
+            
         except Exception as e:
+            import traceback
             logger.error(f"❌ Startup Failure: {e}")
+            logger.error(traceback.format_exc())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,8 +280,7 @@ async def startup_event():
 
 @app.get("/api/config")
 def get_config():
-    if "indices" not in DATA:
-        raise HTTPException(status_code=503)
+    if "indices" not in DATA: raise HTTPException(503)
     return {"indices": DATA["indices"], "categories": CATEGORY_MAP}
 
 
@@ -526,7 +585,7 @@ def create_matplotlib_gauge(current, min_val, max_val, median_val, reverse=False
     fig, ax = plt.subplots(figsize=(4, 0.8))
     
     # 1. Draw Gradient Bar
-    cmap = "RdYlGn" if not reverse else "RdYlGn_r"
+    cmap = "RdYlGn_r" if not reverse else "RdYlGn"
     gradient = np.linspace(0, 1, 256).reshape(1, -1)
     ax.imshow(gradient, aspect="auto", extent=[0, 1, 0, 0.25], cmap=cmap)
 

@@ -57,6 +57,10 @@ CATEGORY_MAP = {
         "NIFTY100 ENH ESG","NIFTY100 ESG","NIFTY100ESGSECLDR","NIFTY100 LIQ 15",
         "NIFTY50 SHARIAH","NIFTY MULTI MFG","NIFTY MULTI INFRA","NIFTY500 SHARIAH",
     ],
+    "International Indices": [
+        "S&P 500", "Nasdaq 100 Futures", "Bitcoin", "Gold", "Silver", 
+        "EEM", "KOSPI", "Shanghai Composite", "Bovespa", "TAIEX"
+    ],
 }
 
 ROLL3_LABEL = "Rolling 3-Yr Avg"
@@ -145,18 +149,34 @@ def get_start_date(label, end_actual):
 def calc_cagr(df_rb, sd, ed, cols, label=None):
     results = {}
     for col in cols:
-        sv, actual_sd = _get_last(df_rb[col], sd)
-        ev, actual_ed = _get_last(df_rb[col], ed)
-        if sv is None or ev is None or sv == 0:
+        val_s, actual_sd = _get_last(df_rb[col], sd)
+        val_e, actual_ed = _get_last(df_rb[col], ed)
+        
+        if val_s is None or val_e is None:
+            results[col] = np.nan
+            continue
+            
+        # --- FIX: Ensure we have a scalar float even if a Series is returned ---
+        try:
+            # If val_s is a Series (due to duplicates), take the first value
+            sv = float(val_s.iloc[0]) if isinstance(val_s, pd.Series) else float(val_s)
+            ev = float(val_e.iloc[0]) if isinstance(val_e, pd.Series) else float(val_e)
+        except Exception as e:
+            print(f"Math Error for {col}: {e}")
+            results[col] = np.nan
+            continue
+
+        if sv == 0 or np.isnan(sv) or np.isnan(ev):
             results[col] = np.nan
             continue
             
         diff_days = (actual_ed - actual_sd).days
         if diff_days < 360 or label in ABS_PERIODS:
-            results[col] = ((ev / sv) - 1) * 100
+            results[col] = (ev / sv - 1) * 100
         else:
             yrs = diff_days / 365.25
-            results[col] = (((ev / sv) ** (1/yrs)) - 1) * 100
+            results[col] = ((ev / sv) ** (1/yrs) - 1) * 100
+                
     return pd.Series(results).round(2)
 
 def calc_vol(df_ret, sd, ed, cols):

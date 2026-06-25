@@ -23,11 +23,10 @@ import { API_BASE_URL } from "@/lib/utils" // 1. Import it
 
 
 const fetchConfig = async (): Promise<{ indices: string[], categories: CategoryMap }> => {
-  // 2. Use backticks (`) and the variable
-  const res = await fetch(`${API_BASE_URL}/api/config`); 
-  if (!res.ok) throw new Error("Failed to fetch config");
+  const res = await fetch(`${API_BASE_URL}/api/config`);
+  if (!res.ok) throw new Error(`Server returned ${res.status}`); // already does this ✓
   return res.json();
-}
+};
 
 const PERIOD_MASTER_ORDER = [
   "Last Week", "Last Month", "3 Month", "6 Month", "YTD", 
@@ -43,7 +42,9 @@ export function Sidebar() {
   const { data: config, isLoading, error } = useQuery({
     queryKey: ["appConfig"],
     queryFn: fetchConfig,
-    staleTime: 0
+    staleTime: 0,
+    retry: 5,                          // ← retry up to 5 times
+    retryDelay: (attempt) => attempt * 2000,  // ← wait 2s, 4s, 6s, 8s, 10s
   });
 
   useEffect(() => {

@@ -19,6 +19,7 @@ import { CalendarView } from "@/components/views/CalendarView"
 import { NavView } from "@/components/views/NavView"
 import { RiskReturnChart } from "@/components/charts/RiskReturnChart"
 import { ValuationView } from "@/components/views/ValuationView"
+import { InternationalView } from "@/components/views/InternationalView"
 
 const TabTransition = ({ children }: { children: React.ReactNode }) => (
   <motion.div
@@ -85,6 +86,7 @@ function DashboardContent() {
                   { id: "calendar", label: "Calendar" },
                   { id: "scatter", label: "Risk vs Return" },
                   { id: "nav", label: "NAV Chart" },
+                  { id: "intl", label: "International" },
                 ].map((tab) => (
                   <TabsTrigger
                     key={tab.id}
@@ -130,6 +132,10 @@ function DashboardContent() {
 
                 <TabsContent value="nav" className="m-0 outline-none">
                   <TabTransition><NavView /></TabTransition>
+                </TabsContent>
+
+                <TabsContent value="intl" className="m-0 outline-none focus-visible:outline-none">
+                  <TabTransition><InternationalView /></TabTransition>
                 </TabsContent>
 
                 <TabsContent value="scatter" className="m-0 outline-none">

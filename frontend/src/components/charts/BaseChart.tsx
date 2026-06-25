@@ -9,7 +9,7 @@ const Plot = dynamic(() => import("react-plotly.js"), {
   loading: () => <Skeleton className="w-full h-full min-h-[400px] rounded-xl" />
 })
 
-export function BaseChart({ data, layout = {}, config = {}, zoomEnabled = false }: any) {
+export function BaseChart({ data, layout = {}, config = {}, zoomEnabled = false, onHover, onUnhover, revision = 0 }: any) {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === "dark"
 
@@ -31,7 +31,6 @@ export function BaseChart({ data, layout = {}, config = {}, zoomEnabled = false 
           linecolor: isDark ? '#334155' : '#e2e8f0',
           zeroline: false,
           automargin: true,
-          // LOCK AXIS IF ZOOM DISABLED
           fixedrange: !zoomEnabled,
         },
         yaxis: {
@@ -40,14 +39,14 @@ export function BaseChart({ data, layout = {}, config = {}, zoomEnabled = false 
           side: "right",
           showline: false,
           automargin: true,
-          // LOCK AXIS IF ZOOM DISABLED
           fixedrange: !zoomEnabled,
         },
         margin: { l: 20, r: 50, t: 20, b: 40 },
         plot_bgcolor: "transparent",
         paper_bgcolor: "transparent",
-        hovermode: "x unified",
-        dragmode: zoomEnabled ? "pan" : false, // Disable dragging if not enabled
+        // Defaulting to closest to prevent the "box explosion"
+        hovermode: "closest",
+        dragmode: zoomEnabled ? "pan" : false,
       }
     },
     ...layout
@@ -58,13 +57,16 @@ export function BaseChart({ data, layout = {}, config = {}, zoomEnabled = false 
       <Plot
         data={data}
         layout={baseLayout as any}
+        revision={revision}
         config={{ 
           displayModeBar: false, 
           responsive: true, 
           doubleClick: zoomEnabled ? 'reset' : false,
-          scrollZoom: zoomEnabled, // Pinch/Wheel zoom only if enabled
+          scrollZoom: zoomEnabled,
           ...config 
         }}
+        onHover={onHover} // Pass events through
+        onUnhover={onUnhover} // Pass events through
         useResizeHandler={true}
         style={{ width: "100%", height: "100%" }}
       />

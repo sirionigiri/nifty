@@ -70,7 +70,7 @@ export function NavChartReal() {
         <BaseChart 
           data={plotData} 
           layout={{ 
-            hovermode: 'x unified',
+            hovermode: 'closest',
             xaxis: { showgrid: false, zeroline: false },
             yaxis: { side: "right", showline: false }
           }} 
