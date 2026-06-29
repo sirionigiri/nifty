@@ -35,23 +35,38 @@ export function ReportModal() {
   const [repPeriods, setRepPeriods] = useState<string[]>([...PRESET_REPORT_PERIODS]);
   
   // --- 💡 SEPARATE PRE-CHECKED LISTS ---
-  const [sectorIndices, setSectorIndices] = useState<string[]>([
-    "NIFTY 500", "NIFTY ENERGY", "NIFTY AUTO", "NIFTY BANK", "NIFTY IT", "NIFTY METAL", "NIFTY CEMENT", 'NIFTY CHEMICALS', 'NIFTY FINSEREXBNK', 'NIFTY HEALTHCARE', 'NIFTY METAL', 'NIFTY REALTY', 'NIFTY CAPITAL MKT', 'NIFTY CPSE', 'NIFTY INDIA MFG', 'NIFTY IND TOURISM', 'NIFTY INFRA', 'NIFTY IPO', 'NIFTY MNC'
-  ]);
-  const [factorIndices, setFactorIndices] = useState<string[]>([
-    "NIFTY500 QLTY50",
-    "NIFTY500 VALUE 50",
-    "NIFTY MULTI MQ 50",
-    "NIFTY500 MQVLV50",
-    "NIFTY200MOMENTM30",
-    "NIFTY200 QUALITY 30",
-    "NIFTY200 VALUE 30",
-    "NIFTY M150 QLTY50",
-    "NIFTYM150MOMNTM50",
-    "NIFTYSML250MQ 100",
-    "NIFTY SML250 Q50",
-    "NIFTY500MOMENTM50"
-  ]);
+  // const [sectorIndices, setSectorIndices] = useState<string[]>([
+  //   "NIFTY 500", "NIFTY ENERGY", "NIFTY AUTO", "NIFTY BANK", "NIFTY IT", "NIFTY METAL", "NIFTY CEMENT", 'NIFTY CHEMICALS', 'NIFTY FINSEREXBNK', 'NIFTY HEALTHCARE', 'NIFTY METAL', 'NIFTY REALTY', 'NIFTY CAPITAL MKT', 'NIFTY CPSE', 'NIFTY INDIA MFG', 'NIFTY IND TOURISM', 'NIFTY INFRA', 'NIFTY IPO', 'NIFTY MNC'
+  // ]);
+  // const [factorIndices, setFactorIndices] = useState<string[]>([
+  //   "NIFTY500 QLTY50",
+  //   "NIFTY500 VALUE 50",
+  //   "NIFTY MULTI MQ 50",
+  //   "NIFTY500 MQVLV50",
+  //   "NIFTY200MOMENTM30",
+  //   "NIFTY200 QUALITY 30",
+  //   "NIFTY200 VALUE 30",
+  //   "NIFTY M150 QLTY50",
+  //   "NIFTYM150MOMNTM50",
+  //   "NIFTYSML250MQ 100",
+  //   "NIFTY SML250 Q50",
+  //   "NIFTY500MOMENTM50"
+  // ]);
+
+  const PRE_CHECKED_SECTORS = [ 
+      "NIFTY 500", "NIFTY AUTO", "NIFTY BANK", "NIFTY CAPITAL MKT", "NIFTY CEMENT", "NIFTY CHEMICALS",
+      "NIFTY CONSR DURBL", "NIFTY FINSEREXBNK", "NIFTY FMCG", "NIFTY IND DEFENCE",
+      "NIFTY IND TOURISM", "NIFTY INDIA MFG", "NIFTY INFRA", "NIFTY IPO", "NIFTY IT",
+      "NIFTY METAL", "NIFTY OIL AND GAS", "NIFTY REALTY", "NIFTY REITS & INVITS", "NIFTY500 HEALTH"
+  ]; 
+
+  const PRE_CHECKED_FACTORS = [
+      "NIFTY 500", "NIFTY500 QUALITY 50", "NIFTY500 VALUE 50", "NIFTY500 MOMENTUM 50",
+      "NIFTY500 LOW VOLATILITY 50", "NIFTY500 EQUAL WEIGHT", "NIFTY500 MULTIFACTOR MQVLV 50"
+  ];
+
+  const [sectorIndices, setSectorIndices] = useState<string[]>(PRE_CHECKED_SECTORS);
+  const [factorIndices, setFactorIndices] = useState<string[]>(PRE_CHECKED_FACTORS);
 
   const { data: config } = useQuery<AppConfig>({
     queryKey: ["appConfig"],

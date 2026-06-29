@@ -5,6 +5,7 @@ import { useStore } from "@/store/useStore"
 import { Card, CardContent } from "@/components/ui/card"
 import { API_BASE_URL } from "@/lib/utils"
 
+
 export function SummaryCards() {
   const { benchmark, selectedIndices, referenceDate } = useStore() // Get referenceDate
 
@@ -30,10 +31,10 @@ export function SummaryCards() {
   }
 
   const cards = [
-    { title: `${benchmark} · 1Y CAGR`, value: data?.cagr1, sub: "calculated from ref", color: getColor(data?.cagr1, "text-green-600") },
+    { title: `${benchmark} · 1Y CAGR`, value: data?.cagr1, sub: `calculated from ${referenceDate}`, color: getColor(data?.cagr1, "text-green-600") },
     { title: `${benchmark} · 20Y CAGR`, value: data?.cagr20, sub: "20-year window", color: getColor(data?.cagr20, "text-green-600") },
-    { title: `${benchmark} · Max DD (YTD)`, value: data?.mdd1, sub: "ref date to Jan 1", color: "text-red-600" }, // Always red for DD
-    { title: `${benchmark} · Vol (YTD)`, value: data?.vol1, sub: "ref date to Jan 1", color: "text-amber-500" },
+    { title: `${benchmark} · Max DD (YTD)`, value: data?.mdd1, sub: `${referenceDate} to Jan 1`, color: "text-red-600" }, // Always red for DD
+    { title: `${benchmark} · Vol (YTD)`, value: data?.vol1, sub: `${referenceDate} to Jan 1`, color: "text-amber-500" },
     { title: `Indices Selected`, value: selectedIndices.length, sub: `active in analysis`, color: "text-blue-600" },
   ]
 

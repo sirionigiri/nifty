@@ -108,7 +108,7 @@ REPORT_SECTOR_MAP = {
     "NIFTY INDIA MFG": "Manufacturing",
     "NIFTY BANK": "Banks",
     "NIFTY CAPITAL MKT": "Capital Market",
-    "NIFTY FINANCIAL SERVICES EX-BANK": "Finserv",
+    "NIFTY FINSEREXBNK": "Finserv",
     "NIFTY CPSE": "Energy",
     "NIFTY CEMENT": "Infra",
     "NIFTY CHEMICALS": "Chemicals",
@@ -734,42 +734,67 @@ def create_matplotlib_gauge(current, min_val, max_val, median_val, reverse=False
     buf.seek(0)
     return buf
 
+
+
+SECTOR_RANK_MAP = {
+    "NIFTY AUTO": "AUTO", "NIFTY BANK": "BANKS", "NIFTY CAPITAL MKT": "CAPITAL MKTS",
+    "NIFTY CEMENT": "CEMENT", "NIFTY CHEMICALS": "CHEMICALS", "NIFTY CONSR DURBL": "CONSUMER DURABLES",
+    "NIFTY FINSEREXBNK": "FINANCIALS exBANKS", "NIFTY FMCG": "FMCG",
+    "NIFTY IND DEFENCE": "DEFENCE", "NIFTY IND TOURISM": "TOURISM", "NIFTY INDIA MFG": "MANUFACTURING",
+    "NIFTY INFRA": "INFRA", "NIFTY IPO": "IPO", "NIFTY IT": "IT", "NIFTY METAL": "METALS",
+    "NIFTY OIL AND GAS": "OIL AND GAS", "NIFTY REALTY": "REALTY", 
+    "NIFTY REITS & INVITS": "REITS & INVITS", "NIFTY500 HEALTH": "HEALTHCARE",
+}
+
+FACTOR_RANK_MAP = {
+    "NIFTY 500": "Benchmark", "NIFTY500 QUALITY 50": "Quality", "NIFTY500 VALUE 50": "Value",
+    "NIFTY500 MOMENTUM 50": "Momentum", "NIFTY500 LOW VOLATILITY 50": "Low Volatility",
+    "NIFTY500 EQUAL WEIGHT": "Size (small)", "NIFTY500 MULTIFACTOR MQVLV 50": "Multi-Factor",
+}
+
+
+
 @app.post("/api/generate-report")
 async def generate_report(request: MetricsRequest):
-    if "rebased" not in DATA: 
+    if "rebased" not in DATA:
         raise HTTPException(status_code=503, detail="Server data not loaded")
-    
+
     try:
         effective_ed = get_effective_end_date(request.reference_date)
         five_yrs_ago = effective_ed - pd.DateOffset(years=5)
-        
+
         output = io.BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
 
-        # --- STYLES ---
+        # --- FORMATS ---
         title_f = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': 'black', 'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 12})
-        head_f = workbook.add_format({'bold': True, 'bg_color': '#F2F2F2', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
-        text_f = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'font_size': 9})
-        perc_f = workbook.add_format({'num_format': '0.0"%"', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
-        num_f = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
-        rank_f = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 8, 'text_wrap': True})
+        head_f  = workbook.add_format({'bold': True, 'bg_color': '#F2F2F2', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
+        text_f  = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'font_size': 9})
+        perc_f  = workbook.add_format({'num_format': '0.0"%"', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
+        num_f   = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
+        rank_f  = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 8, 'text_wrap': True})
         italic_f = workbook.add_format({'italic': True, 'font_size': 8, 'text_wrap': True})
 
         # --- CATEGORIZE INDICES ---
-        factor_list = CATEGORY_MAP.get("Strategy", []) + CATEGORY_MAP.get("Factor Indices", [])
+        factor_list = list(FACTOR_RANK_MAP.keys())
         s_indices = [idx for idx in request.indices if idx not in factor_list]
         f_indices = [idx for idx in request.indices if idx in factor_list]
+
+        # Bench fallback + ensure it leads both lists
         bench = request.benchmark if request.benchmark in DATA['rebased'].columns else "NIFTY 50"
-        
         if bench not in s_indices: s_indices.insert(0, bench)
         if bench not in f_indices: f_indices.insert(0, bench)
+
         num_periods = len(request.periods)
 
-        # --- SHEET 1: SECTOR & THEMATIC ---
+        # ── SHEET 1: SECTOR & THEMATIC ──────────────────────────────────────────
         ws1 = workbook.add_worksheet("Sector Dashboard")
-        ws1.set_column('A:A', 35); ws1.set_column('B:M', 12); ws1.set_column('I:K', 32)
+        ws1.set_column('A:A', 35)
+        ws1.set_column('B:M', 12)
+        ws1.set_column('I:K', 32)
+
         ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
-        ws1.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
+        ws1.merge_range(1, 1, 1, num_periods,             'Performance (%)',            head_f)
         ws1.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Valuations (5Y Linear Gauge)', head_f)
         ws1.write_row('A3', ["Indices"] + request.periods + ["P/E", "P/B", "DY"], head_f)
 
@@ -780,34 +805,60 @@ async def generate_report(request: MetricsRequest):
             ws1.write_row(row_idx, 1, get_perf_row_data(idx, effective_ed, request.periods, bench), perc_f)
             try:
                 v_df = DATA['valuation']
-                hist = v_df[(v_df['Index_Name'].str.upper() == idx.upper()) & (v_df['Date'] >= five_yrs_ago) & (v_df['Date'] <= effective_ed)]
+                hist = v_df[
+                    (v_df['Index_Name'].str.upper() == idx.upper()) &
+                    (v_df['Date'] >= five_yrs_ago) &
+                    (v_df['Date'] <= effective_ed)
+                ]
                 if not hist.empty:
                     for i, col in enumerate(['PE', 'PB', 'Div_Yield']):
                         ser = hist[col].dropna()
                         if not ser.empty:
-                            img = create_matplotlib_gauge(ser.iloc[-1], ser.min(), ser.max(), ser.median(), reverse=(col=='Div_Yield'))
-                            ws1.insert_image(row_idx, 1 + num_periods + i, f"s1_{row_idx}_{i}.png", {'image_data': img, 'x_scale': 0.7, 'y_scale': 0.7, 'x_offset': 10, 'y_offset': 5})
-            except: pass
+                            img = create_matplotlib_gauge(
+                                ser.iloc[-1], ser.min(), ser.max(), ser.median(),
+                                reverse=(col == 'Div_Yield')
+                            )
+                            ws1.insert_image(
+                                row_idx, 1 + num_periods + i,
+                                f"s1_{row_idx}_{i}.png",
+                                {'image_data': img, 'x_scale': 0.7, 'y_scale': 0.7,
+                                 'x_offset': 10, 'y_offset': 5}
+                            )
+            except:
+                pass
             row_idx += 1
-        ws1.merge_range(22, 0, 24, 10, f"Source: niftyindices.com. End Date: {effective_ed.date()}. Rolling 3-Yr Avg since Dec 2020.", italic_f)
 
-        # Sector Rankings Matrix logic (Sheet 1 bottom)
-        ws1.write(26, 0, "Ranking Matrix (Sector)", workbook.add_format({'bold': True}))
+        ws1.merge_range(
+            22, 0, 24, 10,
+            f"Source: niftyindices.com and ElevateWealth. period ending {effective_ed.date()}. All returns annualized except < 1yr.",
+            italic_f
+        )
+
+        # Sector Rankings Matrix
+        ws1.write(26, 0, "Ranking of Thematic/Sector Portfolios (Strict Universe)", workbook.add_format({'bold': True}))
         years = [str(y) for y in range(2016, effective_ed.year)] + [f"{effective_ed.year} (YTD)"]
         ws1.write_row(27, 0, ["Year"] + [f"Rank {i+1}" for i in range(6)], head_f)
+
+        strict_s_universe = [k for k in SECTOR_RANK_MAP.keys() if k in DATA['rebased'].columns]
+
         for r, y_lab in enumerate(years):
             curr_r = 28 + r
             ws1.write(curr_r, 0, y_lab, head_f)
-            rets = calc_cagr(DATA['rebased'], pd.Timestamp(f"{effective_ed.year}-01-01"), effective_ed, s_indices, label="YTD") if "YTD" in y_lab else (DATA['yearly'].loc[y_lab, s_indices] if y_lab in DATA['yearly'].index else pd.Series())
+            if "YTD" in y_lab:
+                rets = calc_cagr(DATA['rebased'], pd.Timestamp(f"{effective_ed.year}-01-01"), effective_ed, strict_s_universe, label="YTD")
+            else:
+                rets = DATA['yearly'].loc[y_lab, strict_s_universe] if y_lab in DATA['yearly'].index else pd.Series()
             top_6 = rets.sort_values(ascending=False).head(6)
             for i, (name, val) in enumerate(top_6.items()):
-                ws1.write(curr_r, i+1, f"{REPORT_SECTOR_MAP.get(name, name)}\n({val:.1f}%)", rank_f)
+                ws1.write(curr_r, i + 1, f"{SECTOR_RANK_MAP.get(name, name)}\n({val:.1f}%)", rank_f)
 
-        # --- SHEET 2: FACTOR DASHBOARD ---
+        # ── SHEET 2: FACTOR DASHBOARD ────────────────────────────────────────────
         ws2 = workbook.add_worksheet("Factor Dashboard")
-        ws2.set_column('A:A', 35); ws2.set_column('B:M', 12)
+        ws2.set_column('A:A', 35)
+        ws2.set_column('B:M', 12)
+
         ws2.merge_range('A1:K1', 'Factor Dashboard', title_f)
-        ws2.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
+        ws2.merge_range(1, 1, 1, num_periods,             'Performance (%)',                head_f)
         ws2.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Risk Metrics (Since Inception)', head_f)
         ws2.write_row('A3', ["Factor Indices"] + request.periods + ["Volatility", "Risk-Adj", "Max DD"], head_f)
 
@@ -816,49 +867,59 @@ async def generate_report(request: MetricsRequest):
             ws2.write(row_idx, 0, idx, text_f)
             ws2.write_row(row_idx, 1, get_perf_row_data(idx, effective_ed, request.periods, bench), perc_f)
             try:
-                incept = DATA['rebased'][idx].dropna().index.min()
-                v_val = calc_vol(DATA['returns'], incept, effective_ed, [idx])[idx]
-                m_val = calc_mdd(DATA['rebased'], incept, effective_ed, [idx])[idx]
-                c_val = calc_cagr(DATA['rebased'], incept, effective_ed, [idx])[idx]
-                ra_val = c_val / v_val if v_val and v_val != 0 else 0
-                ws2.write_row(row_idx, 1 + num_periods, [clean_float(v_val), clean_float(ra_val), clean_float(m_val)], num_f)
-            except: pass
+                incept  = DATA['rebased'][idx].dropna().index.min()
+                v_val   = calc_vol(DATA['returns'], incept, effective_ed, [idx])[idx]
+                m_val   = calc_mdd(DATA['rebased'], incept, effective_ed, [idx])[idx]
+                c_val   = calc_cagr(DATA['rebased'], incept, effective_ed, [idx])[idx]
+                ra_val  = clean_float(c_val / v_val) if v_val else 0
+                ws2.write_row(row_idx, 1 + num_periods, [clean_float(v_val), ra_val, clean_float(m_val)], num_f)
+            except:
+                pass
             row_idx += 1
 
-        # Factor Ranking Table logic (Sheet 2 bottom)
+        # Factor Rankings Matrix
         row_idx += 2
-        ws2.write(row_idx, 0, "Ranking of Factor Portfolios", workbook.add_format({'bold': True}))
-        for i, rd in enumerate(FACTOR_RANKS_STATIC): ws2.write_row(row_idx + 1 + i, 0, rd, text_f if i > 0 else head_f)
-        y26_col = 11; ws2.write(row_idx + 1, y26_col, f"{effective_ed.year} (YTD)", head_f)
-        f_ytd = calc_cagr(DATA['rebased'], pd.Timestamp(f"{effective_ed.year}-01-01"), effective_ed, f_indices, label="YTD").sort_values(ascending=False).head(6)
-        for i, (name, val) in enumerate(f_ytd.items()): ws2.write(row_idx + 2 + i, y26_col, f"{name}\n({val:.1f}%)", rank_f)
+        ws2.write(row_idx, 0, "Ranking of Factor Portfolios (Strict Universe)", workbook.add_format({'bold': True}))
+        for i, rd in enumerate(FACTOR_RANKS_STATIC):
+            ws2.write_row(row_idx + 1 + i, 0, rd, head_f if i == 0 else text_f)
 
-        # --- 🚀 SHEET 3: INTERNATIONAL MARKETS DASHBOARD ---
+        strict_f_universe = [k for k in FACTOR_RANK_MAP.keys() if k in DATA['rebased'].columns]
+        y26_col = len(FACTOR_RANKS_STATIC[0])
+        ws2.write(row_idx + 1, y26_col, f"{effective_ed.year} (YTD)", head_f)
+        f_ytd = calc_cagr(
+            DATA['rebased'], pd.Timestamp(f"{effective_ed.year}-01-01"),
+            effective_ed, strict_f_universe, label="YTD"
+        ).sort_values(ascending=False).head(6)
+        for i, (name, val) in enumerate(f_ytd.items()):
+            ws2.write(row_idx + 2 + i, y26_col, f"{FACTOR_RANK_MAP.get(name, name)}\n({val:.1f}%)", rank_f)
+
+        # ── SHEET 3: INTERNATIONAL DASHBOARD ────────────────────────────────────
         ws3 = workbook.add_worksheet("International Dashboard")
-        ws3.set_column('A:A', 35); ws3.set_column('B:B', 12); ws3.set_column('C:I', 14)
+        ws3.set_column('A:A', 35)
+        ws3.set_column('B:B', 12)
+        ws3.set_column('C:I', 14)
+
         ws3.merge_range('A1:I1', 'International Markets Dashboard', title_f)
-        
-        intl_headers = ["Asset/Index", "currency", "MTD", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "Rolling 3Yr Average"]
+        intl_headers = ["Asset/Index", "Currency", "MTD", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "Rolling 3Yr Average"]
         ws3.write_row('A2', intl_headers, head_f)
 
-        row_idx = 2
         fixed_periods = ["MTD", "YTD", "1 Yr", "3 Yr", "5 Yr", "10 Yr", "Rolling 3-Yr Avg"]
-        
-        # Using the Master list we defined above
+        row_idx = 2
         for item in INTL_REPORT_LIST:
-            # Match the item name with what's in your Parquet
             match = next((c for c in DATA['rebased'].columns if c.upper() in item.upper()), None)
             if match:
                 ws3.write(row_idx, 0, item, text_f)
                 ws3.write(row_idx, 1, INTL_CURRENCY_MAP.get(match, "USD"), text_f)
-                # Performance row
-                perf = get_perf_row_data(match, effective_ed, fixed_periods, request.benchmark)
-                ws3.write_row(row_idx, 2, perf, perc_f)
+                ws3.write_row(row_idx, 2, get_perf_row_data(match, effective_ed, fixed_periods, bench), perc_f)
                 row_idx += 1
 
         workbook.close()
         output.seek(0)
-        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=NSE_Advanced_Report.xlsx"})
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=NSE_Advanced_Report.xlsx"}
+        )
 
     except Exception as e:
         import traceback
