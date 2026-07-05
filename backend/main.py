@@ -42,6 +42,8 @@ from analytics import (
 
 URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/international_data.parquet"
 
+
+URL_MF = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/amfi_fund_performance_daily.parquet"
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,27 +309,20 @@ async def startup_event():
             DATA['indices'] = sorted(combined_wide.columns.tolist())
 
             # 5. Load Mutual Fund Data — isolated so a failure here can't take down the rest
+            # 5. Load Mutual Fund Data — isolated so a failure here can't take down the rest
             logger.info("📡 Loading Mutual Fund Data...")
             try:
-                mf_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    "amfi_fund_performance_daily_.parquet"
-                )
-                mf_raw = pd.read_parquet(mf_path)
+                res_mf = await client.get(URL_MF, timeout=60)
+                res_mf.raise_for_status()
+                mf_raw = pd.read_parquet(io.BytesIO(res_mf.content))
 
-                # Normalize the date column used for snapshotting
                 mf_raw['_date'] = pd.to_datetime(mf_raw['_date'])
 
-                # Pre-split into one DataFrame per available snapshot date.
-                # Each group is already "1 row per scheme" for that date.
                 DATA['mf_by_date'] = {
                     date: g.reset_index(drop=True)
                     for date, g in mf_raw.groupby('_date')
                 }
                 DATA['mf_dates'] = sorted(DATA['mf_by_date'].keys())
-
-                # Keep a reference table (any single date, e.g. latest) for building
-                # filter options like riskometer/benchmark/category lists.
                 DATA['mf_reference'] = DATA['mf_by_date'][DATA['mf_dates'][-1]]
 
                 logger.info(
