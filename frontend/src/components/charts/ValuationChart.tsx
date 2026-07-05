@@ -21,8 +21,12 @@ export function ValuationChart({ title, dates, values, stats, reverseColors = fa
 
   // 1. DYNAMIC Y-BOUNDS CALCULATION
   // This ensures the chart "snaps" to the visible bands, not the infinite void
+  // 1. DYNAMIC Y-BOUNDS CALCULATION
   const maxValue = Math.max(...values);
   const minValue = Math.min(...values);
+
+  // Derive one real SD unit directly from the stats already computed server-side
+  const sd = stats.upper1 - stats.median;
 
   const sdLevels = [
     stats.lower2,
@@ -34,10 +38,13 @@ export function ValuationChart({ title, dates, values, stats, reverseColors = fa
     stats.upper4,
   ].filter(v => v !== null && v !== undefined);
 
-  // Find the smallest SD level above our max data point, or default to Upper 4
-  const dynamicCeiling = (sdLevels.find(v => v > maxValue) ?? stats.upper4) * 1.1;
-  // Find the largest SD level below our min data point, or default to Lower 2
-  const dynamicFloor = ([...sdLevels].reverse().find(v => v < minValue) ?? stats.lower2) * 0.9;
+  // Ceiling: whichever is greater — the actual data max, or the topmost defined SD band —
+  // plus a full extra SD of headroom above it.
+  const dynamicCeiling = Math.max(maxValue, stats.upper4) + sd;
+
+  // Floor: whichever is lower — the actual data min, or the bottom defined SD band —
+  // minus a full extra SD below it.
+  const dynamicFloor = Math.min(minValue, stats.lower2) - sd;
 
   // 2. DEFINE COLORED BANDS (SHAPES)
   const shapes = [

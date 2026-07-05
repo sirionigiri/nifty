@@ -18,7 +18,7 @@ import pandas as pd
 import xlsxwriter
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import List, Optional
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # APP & MIDDLEWARE
 # ─────────────────────────────────────────────────────────────────────────────
 
-app = FastAPI()
+app = FastAPI(default_response_class=ORJSONResponse)
 
 app.add_middleware(
     CORSMiddleware,
@@ -156,6 +156,14 @@ INTL_REPORT_LIST = [
     "EEM", "TAIEX", "Bovespa", "Mexico IPC", "S&P Europe 350", "Gold", "Silver", "Bitcoin"
 ]
 
+MF_MAP = {
+    1: {"name": "Equity", "subs": {1: "Large Cap", 2: "Large & Mid Cap", 3: "Flexicap", 4: "Multi Cap", 5: "Mid Cap", 6: "Small Cap", 7: "Value", 8: "ELSS", 9: "Contra", 10: "Dividend Yield", 11: "Focused", 12: "Quant/Passive"}},
+    2: {"name": "Debt", "subs": {13: "Long Duration", 14: "Income", 15: "Short Term", 16: "Medium Term", 17: "Money Market", 18: "Low Duration", 19: "Ultra Short Duration", 20: "Liquid", 21: "Overnight", 22: "Dynamic Bond", 23: "Corporate Bond", 24: "Credit Risk", 25: "Banking & PSU", 26: "Floater", 28: "Gilt", 29: "Gilt 10yr Constant Duration"}},
+    3: {"name": "Hybrid", "subs": {30: "Aggressive Hybrid", 31: "Conservative Hybrid", 32: "Equity Savings", 33: "Arbitrage", 34: "Multi Asset Allocation", 35: "Balanced Advantage"}},
+    4: {"name": "Solution Oriented", "subs": {36: "Children's Fund", 37: "Retirement Fund"}},
+    5: {"name": "Other", "subs": {38: "Index/Passive", 39: "Gold/Silver ETF FOF"}}
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REQUEST MODEL
@@ -167,8 +175,20 @@ class MetricsRequest(BaseModel):
     indices: List[str]
     benchmark: str
     reference_date: Optional[str] = None
+    include_mf: Optional[bool] = False   # NEW
 
-
+class MFDataRequest(BaseModel):
+    search: Optional[str] = ""
+    subcategories: List[int] = []      # flat list of _subCategory ids, e.g. [1,2,5]
+    riskometers: List[str] = []        # e.g. ["Very High", "High"]
+    benchmarks: List[str] = []         # e.g. ["Nifty 100 TRI"]
+    compare_index: Optional[str] = None  # OUR index name (global benchmark) to compare against
+    reference_date: Optional[str] = None
+    page: int = 1
+    page_size: int = 100
+    sort_by: str = "return1YearRegular"
+    sort_dir: str = "desc"
+    
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,6 +236,19 @@ def clean_float(val) -> Optional[float]:
 # ─────────────────────────────────────────────────────────────────────────────
 # STARTUP — load data into memory
 # ─────────────────────────────────────────────────────────────────────────────
+import bisect
+
+def get_mf_snapshot(effective_ed: pd.Timestamp):
+    """Return (df_snapshot, actual_snapshot_date) for the most recent
+    available MF data on or before effective_ed."""
+    dates = DATA.get('mf_dates')
+    if not dates:
+        return None, None
+    idx = bisect.bisect_right(dates, effective_ed) - 1
+    if idx < 0:
+        return None, None
+    snap_date = dates[idx]
+    return DATA['mf_by_date'][snap_date], snap_date
 
 
 @app.on_event("startup")
@@ -226,58 +259,85 @@ async def startup_event():
             logger.info("📡 Loading NIFTY Data...")
             res1 = await client.get(URL_RETURNS, timeout=60)
             df_nifty_raw = pd.read_parquet(io.BytesIO(res1.content))
-            
+
             # Ensure Nifty Date is datetime and handle whitespace
             df_nifty_raw['Date'] = pd.to_datetime(df_nifty_raw['Date'])
             df_nifty_raw.columns = [c.strip() for c in df_nifty_raw.columns]
-            
+
             # Use your existing prep engine to get the "Wide" rebased Nifty dataframe
             prep = load_and_prepare(df_nifty_raw)
-            nifty_wide = prep['rebased'] # This has Date as Index
-            
+            nifty_wide = prep['rebased']  # This has Date as Index
+
             # 2. Load International Data (Wide format: Date is Index)
             logger.info("📡 Loading International Data...")
             res_intl = await client.get(URL_INTL, timeout=60)
             if res_intl.status_code == 200:
                 df_intl_raw = pd.read_parquet(io.BytesIO(res_intl.content))
-                
+
                 # If 'Ticker' is a level name (multi-index), flatten it
                 if isinstance(df_intl_raw.columns, pd.MultiIndex):
                     df_intl_raw.columns = df_intl_raw.columns.get_level_values(-1)
-                
+
                 # Ensure the index (Date) is datetime
                 df_intl_raw.index = pd.to_datetime(df_intl_raw.index)
                 df_intl_raw.index.name = 'Date'
-                
+
                 # Rebase International Indices to 100 at their own inception
                 df_intl_rebased = df_intl_raw.apply(
                     lambda col: col / col.dropna().iloc[0] * 100 if col.dropna().size > 0 else col
                 )
-                
+
                 # 3. MERGE Nifty Wide + International Wide
-                # concat(axis=1) joins them side-by-side on the Date index
                 combined_wide = pd.concat([nifty_wide, df_intl_rebased], axis=1).sort_index()
                 combined_wide = combined_wide.loc[:, ~combined_wide.columns.duplicated()].copy()
 
-                
                 # Fill weekend/holiday gaps so indices are comparable on any given day
                 combined_wide = combined_wide.ffill()
-                
+
                 logger.info("✅ Data merged successfully.")
             else:
                 combined_wide = nifty_wide
                 logger.warning("⚠️ Intl data fetch failed. Using Nifty only.")
 
-            # 4. Finalize global store
+            # 4. Finalize global store (index/returns engine)
             DATA['rebased'] = combined_wide
-            # Calculate returns for all indices (needed for Vol/Beta)
             DATA['returns'] = (combined_wide.pct_change(fill_method=None).ffill() * 100).round(4)
-            # Calculate yearly and metadata
-            DATA['yearly']  = _calc_yearly(combined_wide)
+            DATA['yearly'] = _calc_yearly(combined_wide)
             DATA['end_date'] = combined_wide.index.max()
             DATA['indices'] = sorted(combined_wide.columns.tolist())
 
-            # 5. Load Valuations
+            # 5. Load Mutual Fund Data — isolated so a failure here can't take down the rest
+            logger.info("📡 Loading Mutual Fund Data...")
+            try:
+                mf_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "amfi_fund_performance_daily_.parquet"
+                )
+                mf_raw = pd.read_parquet(mf_path)
+
+                # Normalize the date column used for snapshotting
+                mf_raw['_date'] = pd.to_datetime(mf_raw['_date'])
+
+                # Pre-split into one DataFrame per available snapshot date.
+                # Each group is already "1 row per scheme" for that date.
+                DATA['mf_by_date'] = {
+                    date: g.reset_index(drop=True)
+                    for date, g in mf_raw.groupby('_date')
+                }
+                DATA['mf_dates'] = sorted(DATA['mf_by_date'].keys())
+
+                # Keep a reference table (any single date, e.g. latest) for building
+                # filter options like riskometer/benchmark/category lists.
+                DATA['mf_reference'] = DATA['mf_by_date'][DATA['mf_dates'][-1]]
+
+                logger.info(
+                    f"✅ Mutual Fund data loaded: {len(DATA['mf_dates'])} snapshot dates, "
+                    f"{len(DATA['mf_reference'])} schemes on latest date."
+                )
+            except Exception as mf_err:
+                logger.error(f"⚠️ Mutual Fund load failed (MF tab will be unavailable): {mf_err}")
+
+            # 6. Load Valuations
             logger.info("📡 Loading Valuation Data...")
             res2 = await client.get(URL_VALUATION, timeout=60)
             if res2.status_code == 200:
@@ -288,9 +348,9 @@ async def startup_event():
                 df_v['Date'] = pd.to_datetime(df_v['Date'])
                 df_v['Index_Name'] = df_v['Index_Name'].astype(str).str.strip()
                 DATA["valuation"] = df_v
-            
+
             logger.info(f"🚀 ENGINE READY: {len(DATA['indices'])} Assets Loaded.")
-            
+
         except Exception as e:
             import traceback
             logger.error(f"❌ Startup Failure: {e}")
@@ -443,46 +503,64 @@ def get_metrics_table(request: MetricsRequest):
         return {"data": [], "error": str(e)}
 
 
+VALUATION_BOUNDS = {
+    "PE": (0, 100),
+    "PB": (0, 30),
+    "Div_Yield": (0, 15),
+}
+
+
+def clean_valuation_column(s: pd.Series, bounds: tuple) -> pd.Series:
+    """Treat out-of-range values as missing, then forward-fill from prior valid data."""
+    lo, hi = bounds
+    s = s.mask((s < lo) | (s > hi))   # garbage -> NaN, so ffill can replace it
+    s = s.ffill()
+    return s
 @app.post("/api/valuation-data")
 def get_val_data(request: MetricsRequest):
     if 'valuation' not in DATA: raise HTTPException(503)
     try:
         effective_ed = get_effective_end_date(request.reference_date)
         df_full = DATA['valuation']
-        
+
         # 1. Filter for Target Index
-        df = df_full[df_full['Index_Name'].str.upper() == request.benchmark.upper()].sort_values('Date')
+        df = df_full[df_full['Index_Name'].str.upper() == request.benchmark.upper()].sort_values('Date').copy()
         if df.empty: return {"error": f"No data for {request.benchmark}"}
 
-        # 2. Slice the Window FIRST
+        # 2. Clean on the FULL history first (garbage -> NaN -> ffill),
+        #    so the window's leading rows have something valid to inherit from.
+        for col, bounds in VALUATION_BOUNDS.items():
+            if col in df.columns:
+                df[col] = clean_valuation_column(df[col], bounds)
+
+        # 3. Slice the Window
         period = request.periods[0] if request.periods else "5 Yr"
         sd = get_start_date(period, effective_ed)
         df_w = df[(df['Date'] >= sd) & (df['Date'] <= effective_ed)].copy()
 
         if df_w.empty: return {"error": "Insufficient data in selected window"}
 
-        # 3. STATS HELPER (Now strictly using the windowed data)
+        # 4. STATS HELPER (unchanged — now works on cleaned data)
         def stats_for_window(s):
             clean_s = s.dropna()
             if clean_s.empty: return None
-            
-            # Recalculate Median and SD based ONLY on the current view
+
             m, std = clean_s.median(), clean_s.std()
             if not np.isfinite(std): std = 0
-            
+
             return {
                 k: clean_float(v) for k, v in {
-                    "median": m, 
-                    "upper4": m + 4*std, "upper3": m + 3*std, 
-                    "upper2": m + 2*std, "upper1": m + std, 
+                    "median": m,
+                    "upper4": m + 4*std, "upper3": m + 3*std,
+                    "upper2": m + 2*std, "upper1": m + std,
                     "lower1": m - std, "lower2": m - 2*std
                 }.items()
             }
-        
+
         return {
-            "dates": df_w['Date'].dt.strftime('%Y-%m-%d').tolist(), 
-            "pe": {"values": [clean_float(v) for v in df_w['PE']], "stats": stats_for_window(df_w['PE'])}, 
-            "pb": {"values": [clean_float(v) for v in df_w['PB']], "stats": stats_for_window(df_w['PB'])}, 
+            "dates": df_w['Date'].dt.strftime('%Y-%m-%d').tolist(),
+            "pe": {"values": [clean_float(v) for v in df_w['PE']], "stats": stats_for_window(df_w['PE'])},
+            "pb": {"values": [clean_float(v) for v in df_w['PB']], "stats": stats_for_window(df_w['PB'])},
             "dy": {"values": [clean_float(v) for v in df_w['Div_Yield']], "stats": stats_for_window(df_w['Div_Yield'])}
         }
     except Exception as e:
@@ -521,7 +599,7 @@ def get_nav_data(request: MetricsRequest):
 
     output = []
     for col in df.columns:
-        s = df[col].dropna()
+        s = df[col].replace([np.inf, -np.inf], np.nan).dropna()
         output.append({"x": s.index.strftime("%Y-%m-%d").tolist(), "y": s.values.tolist(), "name": col})
     return output
 
@@ -913,6 +991,65 @@ async def generate_report(request: MetricsRequest):
                 ws3.write_row(row_idx, 2, get_perf_row_data(match, effective_ed, fixed_periods, bench), perc_f)
                 row_idx += 1
 
+        if request.include_mf and 'mf_by_date' in DATA:
+            df_mf, mf_snap_date = get_mf_snapshot(effective_ed)
+
+            if df_mf is not None:
+                df_mf = df_mf.copy()
+
+                if request.mf_search:
+                    df_mf = df_mf[df_mf['schemeName'].str.contains(request.mf_search, case=False, na=False)]
+                if request.mf_subcategories:
+                    df_mf = df_mf[df_mf['_subCategory'].isin(request.mf_subcategories)]
+                if request.mf_riskometers:
+                    df_mf = df_mf[df_mf['riskometerScheme'].isin(request.mf_riskometers)]
+                if request.mf_benchmarks:
+                    df_mf = df_mf[df_mf['benchmark'].isin(request.mf_benchmarks)]
+
+                df_mf = df_mf.sort_values('return1YearRegular', ascending=False, na_position='last')
+
+                ws4 = workbook.add_worksheet("Mutual Funds")
+                ws4.set_column('A:A', 40)
+                ws4.set_column('B:B', 22)
+                ws4.set_column('C:F', 12)
+
+                ws4.merge_range('A1:F1', 'Mutual Fund Performance', title_f)
+                ws4.merge_range(
+                    'A2:F2',
+                    f"MF data as of {mf_snap_date.strftime('%d %b %Y')} | Index data as of {effective_ed.strftime('%d %b %Y')}",
+                    italic_f
+                )
+                ws4.write_row('A3', ["Scheme Name", "AMFI Benchmark", "NAV", "1 Yr", "3 Yr", "5 Yr", "10 Yr"], head_f)
+
+                # Comparison row for the selected index benchmark
+                def get_idx_ret(period):
+                    try:
+                        sd = get_start_date(period, effective_ed)
+                        return calc_cagr(DATA['rebased'], sd, effective_ed, [bench], label=period)[bench]
+                    except Exception:
+                        return None
+
+                ws4.write(3, 0, f"⭐ BENCHMARK: {bench}", text_f)
+                ws4.write(3, 1, "-", text_f)
+                bench_vals = [None] + [clean_float(get_idx_ret(p)) for p in ["1 Yr", "3 Yr", "5 Yr", "10 Yr"]]
+                ws4.write_row(3, 2, bench_vals, num_f)
+
+                row_idx = 4
+                for _, r in df_mf.head(500).iterrows():
+                    ws4.write(row_idx, 0, r.get('schemeName'), text_f)
+                    ws4.write(row_idx, 1, r.get('benchmark'), text_f)
+                    vals = [
+                        clean_float(r.get('navRegular')),
+                        clean_float(r.get('return1YearRegular')),
+                        clean_float(r.get('return3YearRegular')),
+                        clean_float(r.get('return5YearRegular')),
+                        clean_float(r.get('return10YearRegular')),
+                    ]
+                    ws4.write_row(row_idx, 2, vals, num_f)
+                    row_idx += 1
+            else:
+                logger.warning("⚠️ No MF snapshot available for report date; skipping MF sheet.")
+                
         workbook.close()
         output.seek(0)
         return StreamingResponse(
@@ -925,8 +1062,132 @@ async def generate_report(request: MetricsRequest):
         import traceback
         logger.error(f"REPORT ERROR: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/mf-config")
+def get_mf_config():
+    if 'mf_reference' not in DATA:
+        raise HTTPException(503)
+    df = DATA['mf_reference']
+
+    riskometers = sorted(df['riskometerScheme'].dropna().unique().tolist())
+    benchmarks = sorted(df['benchmark'].dropna().unique().tolist())
+
+    # Distinct (subcategory, riskometer, benchmark) combinations that actually
+    # occur in the data — lets the frontend compute which filter options are
+    # still valid given the other active filters, without a round trip per change.
+    facet_df = df[['_subCategory', 'riskometerScheme', 'benchmark']].dropna().drop_duplicates()
+    facets = [
+        {
+            "subcategory": int(row['_subCategory']),
+            "riskometer": row['riskometerScheme'],
+            "benchmark": row['benchmark'],
+        }
+        for _, row in facet_df.iterrows()
+    ]
+
+    return {
+        "categories": MF_MAP,
+        "riskometers": riskometers,
+        "benchmarks": benchmarks,
+        "facets": facets,
+    }
     
     
+@app.post("/api/mf-data")
+def get_mf_data(request: MFDataRequest):
+    if 'mf_by_date' not in DATA:
+        raise HTTPException(503)
+
+    effective_ed = get_effective_end_date(request.reference_date)
+    df, snap_date = get_mf_snapshot(effective_ed)
+
+    if df is None:
+        return {
+            "rows": [], "comparison_row": None,
+            "total": 0, "page": 1, "page_size": request.page_size,
+            "snapshot_date": None,
+        }
+
+    df = df.copy()
+
+    # --- FILTERS ---
+    if request.search:
+        df = df[df['schemeName'].str.contains(request.search, case=False, na=False)]
+
+    if request.subcategories:
+        df = df[df['_subCategory'].isin(request.subcategories)]
+
+    if request.riskometers:
+        df = df[df['riskometerScheme'].isin(request.riskometers)]
+
+    if request.benchmarks:
+        df = df[df['benchmark'].isin(request.benchmarks)]
+
+    # --- SORT ---
+    sort_col = request.sort_by if request.sort_by in df.columns else "return1YearRegular"
+    ascending = request.sort_dir == "asc"
+    if sort_col in df.columns:
+        df = df.sort_values(sort_col, ascending=ascending, na_position="last")
+
+    total = len(df)
+
+    # --- PAGINATE ---
+    page = max(request.page, 1)
+    page_size = min(max(request.page_size, 1), 500)
+    start = (page - 1) * page_size
+    df_page = df.iloc[start:start + page_size]
+
+    # --- CLEAN ---
+    keep_cols = [
+        "schemeName", "benchmark", "riskometerScheme", "navRegular",
+        "return1YearRegular", "return3YearRegular",
+        "return5YearRegular", "return10YearRegular",
+        "_category", "_subCategory",
+    ]
+    df_page = df_page[[c for c in keep_cols if c in df_page.columns]]
+    df_page = df_page.replace([np.inf, -np.inf], np.nan)
+    df_page = df_page.where(pd.notnull(df_page), None)
+    rows = df_page.to_dict("records")
+
+    # --- COMPARISON ROW (our own index, same 1/3/5/10yr windows, as of effective_ed) ---
+    comparison_row = None
+    if request.compare_index and request.compare_index in DATA["rebased"].columns:
+        idx_name = request.compare_index
+
+        def get_idx_ret(period):
+            try:
+                sd = get_start_date(period, effective_ed)
+                val = calc_cagr(DATA["rebased"], sd, effective_ed, [idx_name], label=period)[idx_name]
+                return clean_float(val)
+            except Exception:
+                return None
+
+        comparison_row = {
+            "schemeName": f"⭐ BENCHMARK: {idx_name}",
+            "benchmark": "-",
+            "riskometerScheme": "-",
+            "navRegular": None,
+            "return1YearRegular": get_idx_ret("1 Yr"),
+            "return3YearRegular": get_idx_ret("3 Yr"),
+            "return5YearRegular": get_idx_ret("5 Yr"),
+            "return10YearRegular": get_idx_ret("10 Yr"),
+            "is_benchmark": True,
+        }
+
+    return {
+        "rows": rows,
+        "comparison_row": comparison_row,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "snapshot_date": snap_date.strftime("%Y-%m-%d"),
+    }
+
+
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ import { NavView } from "@/components/views/NavView"
 import { RiskReturnChart } from "@/components/charts/RiskReturnChart"
 import { ValuationView } from "@/components/views/ValuationView"
 import { InternationalView } from "@/components/views/InternationalView"
+import { MutualFundsView } from "@/components/views/MutualFundsView"
 
 const TabTransition = ({ children }: { children: React.ReactNode }) => (
   <motion.div
@@ -87,6 +88,7 @@ function DashboardContent() {
                   { id: "scatter", label: "Risk vs Return" },
                   { id: "nav", label: "NAV Chart" },
                   { id: "intl", label: "International" },
+                  { id: "mf", label: "Mutual Funds" },
                 ].map((tab) => (
                   <TabsTrigger
                     key={tab.id}
@@ -136,6 +138,10 @@ function DashboardContent() {
 
                 <TabsContent value="intl" className="m-0 outline-none focus-visible:outline-none">
                   <TabTransition><InternationalView /></TabTransition>
+                </TabsContent>
+
+                <TabsContent value="mf" className="m-0 focus-visible:outline-none">
+                  <TabTransition><MutualFundsView /></TabTransition>
                 </TabsContent>
 
                 <TabsContent value="scatter" className="m-0 outline-none">
