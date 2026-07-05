@@ -43,7 +43,7 @@ from analytics import (
 URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/international_data.parquet"
 
 
-URL_MF = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/amfi_fund_performance_daily.parquet"
+URL_MF = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/amfi_fund_performance_daily_.parquet"
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────────────────────────────────────
