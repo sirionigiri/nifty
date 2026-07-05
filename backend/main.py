@@ -16,6 +16,7 @@ import bisect
 import httpx
 import numpy as np
 import pandas as pd
+import duckdb
 import xlsxwriter
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -103,12 +104,17 @@ URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data
 # In-memory data store populated at startup
 DATA = {}
 
-# Only pull the MF columns actually consumed anywhere in this file.
-# The source parquet has ~50 columns; we use ~10. This is the single
-# biggest memory lever available at load time (~80% cut before any
-# dtype work even happens).
-MF_KEEP_COLS = [
-    "_date",
+# Local path where the MF parquet file is downloaded once at startup.
+# DuckDB queries this file directly on every request — it reads only the
+# columns/rows a given query asks for (columnar + predicate pushdown), so
+# the full ~7M-row / ~34MB file is NEVER materialized into a pandas
+# DataFrame in process memory. Only small per-request result sets
+# (a single day's ~2,000-row snapshot, or a filtered/paginated slice of it)
+# ever exist in memory, and only for the duration of that request.
+MF_PARQUET_PATH = "/tmp/mf_data.parquet"
+
+# Columns returned by MF queries (mirrors what the frontend/report consume)
+MF_SELECT_COLS = [
     "schemeName",
     "benchmark",
     "riskometerScheme",
@@ -120,6 +126,14 @@ MF_KEEP_COLS = [
     "_category",
     "_subCategory",
 ]
+
+# Sort column can't be parameterized in SQL (placeholders only work for
+# values, not identifiers), so any user-supplied sort_by must be checked
+# against this whitelist before being interpolated into the query string.
+ALLOWED_MF_SORT_COLS = {
+    "schemeName", "benchmark", "riskometerScheme", "navRegular",
+    "return1YearRegular", "return3YearRegular", "return5YearRegular", "return10YearRegular",
+}
 
 # Maps index names to human-readable sector/type labels used in the Excel report
 REPORT_SECTOR_MAP = {
@@ -373,8 +387,16 @@ async def startup_event():
 
                 mf_raw['_date'] = pd.to_datetime(mf_raw['_date'])
 
-                # Downcast heavy repeated-string columns to category
-                for col in ['benchmark', 'riskometerScheme']:
+                # Downcast heavy repeated-string columns to category.
+                # IMPORTANT: schemeName looks high-cardinality (one per fund)
+                # but is actually low-cardinality ACROSS THE FULL HISTORY —
+                # each of the ~2,000 distinct fund names repeats once per
+                # snapshot date (~3,800 dates), so it's stored ~3,800x over
+                # as a full Python string object per occurrence. This single
+                # column was responsible for the vast majority of the 1GB
+                # footprint. Categorical dtype stores each unique string once
+                # and references it by a small int code per row instead.
+                for col in ['benchmark', 'riskometerScheme', 'schemeName']:
                     if col in mf_raw.columns:
                         mf_raw[col] = mf_raw[col].astype('category')
 
@@ -387,10 +409,6 @@ async def startup_event():
                 float_cols = mf_raw.select_dtypes(include=['float64']).columns
                 if len(float_cols):
                     mf_raw[float_cols] = mf_raw[float_cols].astype('float32')
-
-                # schemeName is high-cardinality (one per fund) so category doesn't
-                # help much, but interning as a plain string column is fine — it's
-                # already included in MF_KEEP_COLS, no separate copy needed.
 
                 mf_raw = mf_raw.reset_index(drop=True)
 
