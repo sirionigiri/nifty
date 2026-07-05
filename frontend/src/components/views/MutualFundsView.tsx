@@ -72,7 +72,17 @@ export function MutualFundsView() {
   const { data: config, isError: configError } = useQuery<MFConfig>({
     queryKey: ["mf-config"],
     queryFn: async () => {
-      const res = await fetch(`${API_BASE_URL}/api/mf-config`)
+        const url = `${API_BASE_URL}/api/mf-config`;
+        console.log("Fetching:", url);
+
+        const res = await fetch(url);
+
+        console.log("Status:", res.status);
+        console.log("OK:", res.ok);
+
+        if (!res.ok) {
+        console.log(await res.text());
+        }
       if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`)
       return res.json()
     },
