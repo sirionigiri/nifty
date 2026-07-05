@@ -19,3 +19,4 @@ uvicorn==0.39.0
 websockets==15.0.1
 xlsxwriter==3.2.9
 yfinance==1.2.0
+httpx
