@@ -11,7 +11,7 @@ CATEGORY_MAP = {
         "NIFTY MID SELECT","NIFTY MIDSML 400","NIFTY MIDSMALLCAP400 50:50",
         "NIFTY NEXT 50","NIFTY SMLCAP 100","NIFTY SMLCAP 250",
         "NIFTY SMLCAP 50","NIFTY SMALLCAP 500","NIFTY TOTAL MKT",
-        "NIFTY500 LMS EQL","NIFTY500 MULTICAP",
+        "NIFTY500 LMS EQL","NIFTY500 MULTICAP", 
     ],
     
     "Strategy": [
@@ -59,7 +59,7 @@ CATEGORY_MAP = {
     ],
     "International Indices": [
         "S&P 500", "Nasdaq 100 Futures", "Bitcoin", "Gold", "Silver", 
-        "EEM", "KOSPI", "Shanghai Composite", "Bovespa", "TAIEX"
+        "EEM", "KOSPI", "Shanghai Composite", "Bovespa", "TAIEX", "MEXICO IPC",
     ],
 }
 

@@ -159,7 +159,7 @@ INTL_REPORT_LIST = [
 ]
 
 MF_MAP = {
-    1: {"name": "Equity", "subs": {1: "Large Cap", 2: "Large & Mid Cap", 3: "Flexicap", 4: "Multi Cap", 5: "Mid Cap", 6: "Small Cap", 7: "Value", 8: "ELSS", 9: "Contra", 10: "Dividend Yield", 11: "Focused", 12: "Quant/Passive"}},
+    1: {"name": "Equity", "subs": {1: "Large Cap", 2: "Large & Mid Cap", 3: "Flexicap", 4: "Multi Cap", 5: "Mid Cap", 6: "Small Cap", 7: "Value", 8: "ELSS", 9: "Contra", 10: "Dividend Yield", 11: "Focused", 12: "Sectoral/Thematic"}},
     2: {"name": "Debt", "subs": {13: "Long Duration", 14: "Income", 15: "Short Term", 16: "Medium Term", 17: "Money Market", 18: "Low Duration", 19: "Ultra Short Duration", 20: "Liquid", 21: "Overnight", 22: "Dynamic Bond", 23: "Corporate Bond", 24: "Credit Risk", 25: "Banking & PSU", 26: "Floater", 28: "Gilt", 29: "Gilt 10yr Constant Duration"}},
     3: {"name": "Hybrid", "subs": {30: "Aggressive Hybrid", 31: "Conservative Hybrid", 32: "Equity Savings", 33: "Arbitrage", 34: "Multi Asset Allocation", 35: "Balanced Advantage"}},
     4: {"name": "Solution Oriented", "subs": {36: "Children's Fund", 37: "Retirement Fund"}},
