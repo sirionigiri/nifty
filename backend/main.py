@@ -45,8 +45,15 @@ from analytics import (
 )
 
 URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/international_data.parquet"
-URL_MF = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/amfi_fund_performance_daily_.parquet"
+# URL_MF = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/amfi_fund_performance_daily_.parquet"
 
+URL_MF = "https://raw.githubusercontent.com/sirionigiri/mf-data/main/amfi_fund_performance_daily.parquet"
+
+MF_KEEP_COLS = [
+    '_date', 'schemeName', '_maturityType', '_category', '_subCategory',
+       'benchmark', 'riskometerScheme', 'navDate',
+       'navRegular', 'return1YearRegular', 'return3YearRegular',  'return5YearRegular', 'return10YearRegular'
+]
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────────────────────────────────────
