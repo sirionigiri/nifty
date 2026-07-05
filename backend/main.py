@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import time
+import bisect
 
 # ── Third-Party ───────────────────────────────────────────────────────────────
 import httpx
@@ -22,6 +23,8 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import List, Optional
+import matplotlib
+matplotlib.use("Agg")  # headless backend — avoids GUI/font-cache overhead on cold start
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 
@@ -41,9 +44,8 @@ from analytics import (
 )
 
 URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/international_data.parquet"
-
-
 URL_MF = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/amfi_fund_performance_daily_.parquet"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,7 +67,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 
 class CacheControlMiddleware(BaseHTTPMiddleware):
@@ -101,6 +102,24 @@ URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data
 
 # In-memory data store populated at startup
 DATA = {}
+
+# Only pull the MF columns actually consumed anywhere in this file.
+# The source parquet has ~50 columns; we use ~10. This is the single
+# biggest memory lever available at load time (~80% cut before any
+# dtype work even happens).
+MF_KEEP_COLS = [
+    "_date",
+    "schemeName",
+    "benchmark",
+    "riskometerScheme",
+    "navRegular",
+    "return1YearRegular",
+    "return3YearRegular",
+    "return5YearRegular",
+    "return10YearRegular",
+    "_category",
+    "_subCategory",
+]
 
 # Maps index names to human-readable sector/type labels used in the Excel report
 REPORT_SECTOR_MAP = {
@@ -177,7 +196,15 @@ class MetricsRequest(BaseModel):
     indices: List[str]
     benchmark: str
     reference_date: Optional[str] = None
-    include_mf: Optional[bool] = False   # NEW
+    include_mf: Optional[bool] = False
+    # Optional MF filters for the report's "Mutual Funds" sheet.
+    # Previously referenced via request.mf_search etc. without being
+    # declared on the model — added here so generate_report doesn't 500.
+    mf_search: Optional[str] = ""
+    mf_subcategories: Optional[List[int]] = []
+    mf_riskometers: Optional[List[str]] = []
+    mf_benchmarks: Optional[List[str]] = []
+
 
 class MFDataRequest(BaseModel):
     search: Optional[str] = ""
@@ -190,7 +217,7 @@ class MFDataRequest(BaseModel):
     page_size: int = 100
     sort_by: str = "return1YearRegular"
     sort_dir: str = "desc"
-    
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +244,7 @@ def get_perf_row_data(idx, ed, periods, benchmark):
             results.append(None)
     return results
 
+
 def get_effective_end_date(req_date: Optional[str]):
     """Return a normalized Timestamp for the requested reference date,
     falling back to the dataset's last available date."""
@@ -235,14 +263,18 @@ def clean_float(val) -> Optional[float]:
     return round(float(val), 2)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STARTUP — load data into memory
-# ─────────────────────────────────────────────────────────────────────────────
-import bisect
-
 def get_mf_snapshot(effective_ed: pd.Timestamp):
     """Return (df_snapshot, actual_snapshot_date) for the most recent
-    available MF data on or before effective_ed."""
+    available MF data on or before effective_ed.
+
+    IMPORTANT (memory): this slices rows out of a single retained
+    DataFrame (DATA['mf_full']) using precomputed integer-position
+    arrays (DATA['mf_date_indices']). It does NOT keep a separate
+    DataFrame per date in memory — with 7M+ rows across many dates,
+    materializing one DataFrame per date (the old approach) roughly
+    doubled peak memory during construction and permanently retained
+    N full copies of the data afterward.
+    """
     dates = DATA.get('mf_dates')
     if not dates:
         return None, None
@@ -250,8 +282,14 @@ def get_mf_snapshot(effective_ed: pd.Timestamp):
     if idx < 0:
         return None, None
     snap_date = dates[idx]
-    return DATA['mf_by_date'][snap_date], snap_date
+    row_positions = DATA['mf_date_indices'][snap_date]
+    snapshot = DATA['mf_full'].iloc[row_positions].reset_index(drop=True)
+    return snapshot, snap_date
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STARTUP — load data into memory
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup_event():
@@ -309,25 +347,65 @@ async def startup_event():
             DATA['indices'] = sorted(combined_wide.columns.tolist())
 
             # 5. Load Mutual Fund Data — isolated so a failure here can't take down the rest
-            # 5. Load Mutual Fund Data — isolated so a failure here can't take down the rest
+            #
+            # MEMORY NOTES:
+            #   a) Only read the columns we actually use anywhere in this file
+            #      (MF_KEEP_COLS) instead of all ~50 columns in the source
+            #      parquet. This is the biggest single win — cuts memory
+            #      roughly in proportion to columns dropped (~80% here).
+            #   b) Downcast dtypes: repeated string columns -> category,
+            #      float64 -> float32. Categoricals store each distinct
+            #      string once and reference it by a small integer code,
+            #      instead of one Python object per cell.
+            #   c) Do NOT split into one DataFrame per date. Instead keep
+            #      a single DataFrame (mf_full) and store only integer row
+            #      positions per date (mf_date_indices) via groupby(...).indices,
+            #      which is effectively free compared to copying data.
             logger.info("📡 Loading Mutual Fund Data...")
             try:
                 res_mf = await client.get(URL_MF, timeout=60)
                 res_mf.raise_for_status()
-                mf_raw = pd.read_parquet(io.BytesIO(res_mf.content))
+
+                mf_raw = pd.read_parquet(
+                    io.BytesIO(res_mf.content),
+                    columns=[c for c in MF_KEEP_COLS],  # column pruning at read time
+                )
 
                 mf_raw['_date'] = pd.to_datetime(mf_raw['_date'])
 
-                DATA['mf_by_date'] = {
-                    date: g.reset_index(drop=True)
-                    for date, g in mf_raw.groupby('_date')
-                }
-                DATA['mf_dates'] = sorted(DATA['mf_by_date'].keys())
-                DATA['mf_reference'] = DATA['mf_by_date'][DATA['mf_dates'][-1]]
+                # Downcast heavy repeated-string columns to category
+                for col in ['benchmark', 'riskometerScheme']:
+                    if col in mf_raw.columns:
+                        mf_raw[col] = mf_raw[col].astype('category')
+
+                # _category / _subCategory are small integer codes — store compactly
+                for col in ['_category', '_subCategory']:
+                    if col in mf_raw.columns:
+                        mf_raw[col] = pd.to_numeric(mf_raw[col], errors='coerce').astype('float32')
+
+                # Downcast float64 numeric columns to float32 (halves their footprint)
+                float_cols = mf_raw.select_dtypes(include=['float64']).columns
+                if len(float_cols):
+                    mf_raw[float_cols] = mf_raw[float_cols].astype('float32')
+
+                # schemeName is high-cardinality (one per fund) so category doesn't
+                # help much, but interning as a plain string column is fine — it's
+                # already included in MF_KEEP_COLS, no separate copy needed.
+
+                mf_raw = mf_raw.reset_index(drop=True)
+
+                DATA['mf_full'] = mf_raw
+                DATA['mf_date_indices'] = mf_raw.groupby('_date').indices  # {Timestamp: np.array of row positions}
+                DATA['mf_dates'] = sorted(DATA['mf_date_indices'].keys())
+
+                # Reference snapshot (latest date) built the same cheap way
+                latest_date = DATA['mf_dates'][-1]
+                DATA['mf_reference'] = mf_raw.iloc[DATA['mf_date_indices'][latest_date]].reset_index(drop=True)
 
                 logger.info(
                     f"✅ Mutual Fund data loaded: {len(DATA['mf_dates'])} snapshot dates, "
-                    f"{len(DATA['mf_reference'])} schemes on latest date."
+                    f"{len(DATA['mf_reference'])} schemes on latest date, "
+                    f"{mf_raw.memory_usage(deep=True).sum() / 1e6:.1f} MB in memory."
                 )
             except Exception as mf_err:
                 logger.error(f"⚠️ Mutual Fund load failed (MF tab will be unavailable): {mf_err}")
@@ -425,7 +503,7 @@ def get_metrics_table(request: MetricsRequest):
         all_cols = DATA["rebased"].columns.tolist()
         req_indices = [idx.strip().upper() for idx in request.indices]
         valid_indices = [c for c in all_cols if c.strip().upper() in req_indices]
-        
+
         # Robust benchmark matching
         bench_match = next(
             (c for c in all_cols if c.strip().upper() == request.benchmark.strip().upper()),
@@ -468,11 +546,11 @@ def get_metrics_table(request: MetricsRequest):
                 date_ranges[p] = f"Jan {yr - 2} - Dec {yr}"
             else:
                 target_sd = get_start_date(p, effective_ed)
-                
+
                 # FIX: Check what date was actually used for the anchor (Benchmark)
                 # This unpacks the (Value, Date) tuple from our new _get_last
                 _, actual_sd = _get_last(DATA["rebased"][bench_match], target_sd)
-                
+
                 # Determine what to show in the UI label
                 if p == "MTD":
                     sd_show = pd.Timestamp(f"{effective_ed.year}-{effective_ed.month:02d}-01")
@@ -481,7 +559,7 @@ def get_metrics_table(request: MetricsRequest):
                 else:
                     # If actual_sd is inception (newer than target), show inception date
                     sd_show = actual_sd if actual_sd else target_sd
-                
+
                 date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
 
         # 3. FORMAT FINAL RESPONSE
@@ -511,6 +589,8 @@ def clean_valuation_column(s: pd.Series, bounds: tuple) -> pd.Series:
     s = s.mask((s < lo) | (s > hi))   # garbage -> NaN, so ffill can replace it
     s = s.ffill()
     return s
+
+
 @app.post("/api/valuation-data")
 def get_val_data(request: MetricsRequest):
     if 'valuation' not in DATA: raise HTTPException(503)
@@ -632,7 +712,7 @@ def get_calendar_rankings(request: MetricsRequest):
         # Clean names (remove hidden spaces) for matching
         selected = [s.strip() for s in request.indices]
         available_cols = [c for c in all_cols if c.strip() in selected]
-        
+
         if not available_cols:
             return []
 
@@ -646,14 +726,14 @@ def get_calendar_rankings(request: MetricsRequest):
             # Standardize the year label
             y_label = str(year).split('-')[0] # Get just "2007" if it's a timestamp
             item = {"Year": y_label}
-            
+
             # Map the ranks found in this row
             valid_row = False
             for idx_name, rank_val in row.items():
                 if not np.isnan(rank_val):
                     item[f"Rank {int(rank_val)}"] = idx_name
                     valid_row = True
-            
+
             # Only add the year if there is at least one rank found
             if valid_row:
                 results.append(item)
@@ -808,14 +888,13 @@ def create_matplotlib_gauge(current, min_val, max_val, median_val, reverse=False
     return buf
 
 
-
 SECTOR_RANK_MAP = {
     "NIFTY AUTO": "AUTO", "NIFTY BANK": "BANKS", "NIFTY CAPITAL MKT": "CAPITAL MKTS",
     "NIFTY CEMENT": "CEMENT", "NIFTY CHEMICALS": "CHEMICALS", "NIFTY CONSR DURBL": "CONSUMER DURABLES",
     "NIFTY FINSEREXBNK": "FINANCIALS exBANKS", "NIFTY FMCG": "FMCG",
     "NIFTY IND DEFENCE": "DEFENCE", "NIFTY IND TOURISM": "TOURISM", "NIFTY INDIA MFG": "MANUFACTURING",
     "NIFTY INFRA": "INFRA", "NIFTY IPO": "IPO", "NIFTY IT": "IT", "NIFTY METAL": "METALS",
-    "NIFTY OIL AND GAS": "OIL AND GAS", "NIFTY REALTY": "REALTY", 
+    "NIFTY OIL AND GAS": "OIL AND GAS", "NIFTY REALTY": "REALTY",
     "NIFTY REITS & INVITS": "REITS & INVITS", "NIFTY500 HEALTH": "HEALTHCARE",
 }
 
@@ -824,7 +903,6 @@ FACTOR_RANK_MAP = {
     "NIFTY500 MOMENTUM 50": "Momentum", "NIFTY500 LOW VOLATILITY 50": "Low Volatility",
     "NIFTY500 EQUAL WEIGHT": "Size (small)", "NIFTY500 MULTIFACTOR MQVLV 50": "Multi-Factor",
 }
-
 
 
 @app.post("/api/generate-report")
@@ -986,20 +1064,25 @@ async def generate_report(request: MetricsRequest):
                 ws3.write_row(row_idx, 2, get_perf_row_data(match, effective_ed, fixed_periods, bench), perc_f)
                 row_idx += 1
 
-        if request.include_mf and 'mf_by_date' in DATA:
+        if request.include_mf and 'mf_full' in DATA:
             df_mf, mf_snap_date = get_mf_snapshot(effective_ed)
 
             if df_mf is not None:
                 df_mf = df_mf.copy()
 
-                if request.mf_search:
-                    df_mf = df_mf[df_mf['schemeName'].str.contains(request.mf_search, case=False, na=False)]
-                if request.mf_subcategories:
-                    df_mf = df_mf[df_mf['_subCategory'].isin(request.mf_subcategories)]
-                if request.mf_riskometers:
-                    df_mf = df_mf[df_mf['riskometerScheme'].isin(request.mf_riskometers)]
-                if request.mf_benchmarks:
-                    df_mf = df_mf[df_mf['benchmark'].isin(request.mf_benchmarks)]
+                mf_search = getattr(request, "mf_search", "") or ""
+                mf_subcategories = getattr(request, "mf_subcategories", []) or []
+                mf_riskometers = getattr(request, "mf_riskometers", []) or []
+                mf_benchmarks = getattr(request, "mf_benchmarks", []) or []
+
+                if mf_search:
+                    df_mf = df_mf[df_mf['schemeName'].str.contains(mf_search, case=False, na=False)]
+                if mf_subcategories:
+                    df_mf = df_mf[df_mf['_subCategory'].isin(mf_subcategories)]
+                if mf_riskometers:
+                    df_mf = df_mf[df_mf['riskometerScheme'].isin(mf_riskometers)]
+                if mf_benchmarks:
+                    df_mf = df_mf[df_mf['benchmark'].isin(mf_benchmarks)]
 
                 df_mf = df_mf.sort_values('return1YearRegular', ascending=False, na_position='last')
 
@@ -1024,7 +1107,7 @@ async def generate_report(request: MetricsRequest):
                     except Exception:
                         return None
 
-                ws4.write(3, 0, f"⭐ BENCHMARK: {bench}", text_f)
+                ws4.write(3, 0, f" BENCHMARK: {bench}", text_f)
                 ws4.write(3, 1, "-", text_f)
                 bench_vals = [None] + [clean_float(get_idx_ret(p)) for p in ["1 Yr", "3 Yr", "5 Yr", "10 Yr"]]
                 ws4.write_row(3, 2, bench_vals, num_f)
@@ -1044,7 +1127,7 @@ async def generate_report(request: MetricsRequest):
                     row_idx += 1
             else:
                 logger.warning("⚠️ No MF snapshot available for report date; skipping MF sheet.")
-                
+
         workbook.close()
         output.seek(0)
         return StreamingResponse(
@@ -1065,8 +1148,8 @@ def get_mf_config():
         raise HTTPException(503)
     df = DATA['mf_reference']
 
-    riskometers = sorted(df['riskometerScheme'].dropna().unique().tolist())
-    benchmarks = sorted(df['benchmark'].dropna().unique().tolist())
+    riskometers = sorted(df['riskometerScheme'].dropna().astype(str).unique().tolist())
+    benchmarks = sorted(df['benchmark'].dropna().astype(str).unique().tolist())
 
     # Distinct (subcategory, riskometer, benchmark) combinations that actually
     # occur in the data — lets the frontend compute which filter options are
@@ -1087,11 +1170,11 @@ def get_mf_config():
         "benchmarks": benchmarks,
         "facets": facets,
     }
-    
-    
+
+
 @app.post("/api/mf-data")
 def get_mf_data(request: MFDataRequest):
-    if 'mf_by_date' not in DATA:
+    if 'mf_full' not in DATA:
         raise HTTPException(503)
 
     effective_ed = get_effective_end_date(request.reference_date)
@@ -1159,7 +1242,7 @@ def get_mf_data(request: MFDataRequest):
                 return None
 
         comparison_row = {
-            "schemeName": f"⭐ BENCHMARK: {idx_name}",
+            "schemeName": f" BENCHMARK: {idx_name}",
             "benchmark": "-",
             "riskometerScheme": "-",
             "navRegular": None,
@@ -1178,9 +1261,6 @@ def get_mf_data(request: MFDataRequest):
         "page_size": page_size,
         "snapshot_date": snap_date.strftime("%Y-%m-%d"),
     }
-
-
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────

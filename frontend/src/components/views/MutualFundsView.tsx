@@ -8,7 +8,10 @@ import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
 import { API_BASE_URL } from "@/lib/utils"
 import { LoadingSpinner } from "../ui/LoadingSpinner"
-import { Search, Filter, ChevronDown, ChevronRight } from "lucide-react"
+
+import { Search, Filter, ChevronDown, ChevronRight, Download } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { exportToExcel } from "@/lib/export"
 
 type Facet = { subcategory: number; riskometer: string; benchmark: string }
 
@@ -64,6 +67,7 @@ export function MutualFundsView() {
   const [page, setPage] = useState(1)
   const PAGE_SIZE = 100
   const didInitDefaults = useRef(false)
+  const [isExporting, setIsExporting] = useState(false)
 
   const { data: config, isError: configError } = useQuery<MFConfig>({
     queryKey: ["mf-config"],
@@ -75,20 +79,19 @@ export function MutualFundsView() {
     staleTime: Infinity,
   })
 
-  // ── Default selection: Equity category (all its subs) + "Very High" riskometer ──
   // ── Default selection: Equity > Large Cap only + "Very High" riskometer ──
-    useEffect(() => {
+  useEffect(() => {
     if (config && !didInitDefaults.current) {
-        const largeCap = config.categories?.["1"]?.subs?.["1"] // category 1 = Equity, sub 1 = Large Cap
-        if (largeCap) {
+      const largeCap = config.categories?.["1"]?.subs?.["1"] // category 1 = Equity, sub 1 = Large Cap
+      if (largeCap) {
         setSelectedSubs([1])
-        }
-        if (config.riskometers?.includes("Very High")) {
+      }
+      if (config.riskometers?.includes("Very High")) {
         setSelectedRiskometers(["Very High"])
-        }
-        didInitDefaults.current = true
+      }
+      didInitDefaults.current = true
     }
-    }, [config])
+  }, [config])
 
   const facets = config?.facets ?? []
 
@@ -136,6 +139,65 @@ export function MutualFundsView() {
   const comparisonRow = data?.comparison_row
   const total = data?.total ?? 0
   const tableRows = comparisonRow ? [comparisonRow, ...rows] : rows
+
+  // ── Export ALL pages matching current filters (not just the current 100-row page) ──
+  const handleDownload = async () => {
+    if (total === 0) return
+    setIsExporting(true)
+
+    try {
+      const EXPORT_PAGE_SIZE = 500 // backend caps page_size at 500
+      const totalExportPages = Math.max(Math.ceil(total / EXPORT_PAGE_SIZE), 1)
+
+      const allRows: any[] = []
+      let comparisonRowForExport: any = null
+
+      for (let p = 1; p <= totalExportPages; p++) {
+        const res = await fetch(`${API_BASE_URL}/api/mf-data`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            search,
+            subcategories: selectedSubs,
+            riskometers: selectedRiskometers,
+            benchmarks: selectedBenchmarks,
+            compare_index: benchmark,
+            reference_date: referenceDate,
+            page: p,
+            page_size: EXPORT_PAGE_SIZE,
+          }),
+        })
+        if (!res.ok) throw new Error(`Export fetch failed on page ${p}: ${res.status}`)
+        const json = await res.json()
+
+        if (p === 1 && json.comparison_row) {
+          comparisonRowForExport = json.comparison_row
+        }
+        allRows.push(...(json.rows ?? []))
+      }
+
+      const combined = comparisonRowForExport ? [comparisonRowForExport, ...allRows] : allRows
+
+      const exportRows = combined.map((r: any) => ({
+        "Scheme Name": r.schemeName,
+        "AMFI Benchmark": r.benchmark,
+        "Riskometer": r.riskometerScheme ?? "-",
+        "NAV": r.navRegular ?? null,
+        "1 Yr (%)": r.return1YearRegular ?? null,
+        "3 Yr (%)": r.return3YearRegular ?? null,
+        "5 Yr (%)": r.return5YearRegular ?? null,
+        "10 Yr (%)": r.return10YearRegular ?? null,
+      }))
+
+      exportToExcel(exportRows, `Mutual_Funds_${benchmark.replace(/\s+/g, "_")}_Report`)
+    } catch (err) {
+      console.error("Export failed:", err)
+      // if you have `toast` imported elsewhere in the app, this is a good place for it:
+      // toast.error("Export failed", { description: (err as Error).message })
+    } finally {
+      setIsExporting(false)
+    }
+  }
 
   const toggleSub = (subId: number) => {
     setPage(1)
@@ -383,11 +445,23 @@ export function MutualFundsView() {
                 Mutual Fund Performance vs {benchmark}
               </h3>
             </div>
-            {!isLoading && !isError && (
-              <span className="text-[10px] text-slate-400 font-medium">
-                {total.toLocaleString()} funds match filters
-              </span>
-            )}
+            <div className="flex items-center gap-4">
+              {!isLoading && !isError && (
+                <span className="text-[10px] text-slate-400 font-medium">
+                  {total.toLocaleString()} funds match filters
+                </span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDownload}
+                disabled={isLoading || isError || total === 0 || isExporting}
+                className="h-8 text-[10px] font-bold uppercase tracking-widest border-slate-200 dark:border-slate-800 hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:text-blue-600 transition-all shadow-sm"
+              >
+                <Download className="w-3 h-3 mr-2" />
+                {isExporting ? "Exporting..." : "Excel"}
+              </Button>
+            </div>
           </div>
 
           <div className="screener-table bg-white dark:bg-slate-900/40 rounded-3xl border border-slate-200 dark:border-slate-800 p-2 shadow-sm overflow-hidden">
