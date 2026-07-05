@@ -71,11 +71,12 @@ export function Sidebar() {
     if (!config) return null;
     const mappedSet = new Set(Object.values(config.categories).flat());
     const otherIndices = config.indices.filter(idx => !mappedSet.has(idx));
+    console.log("Other Indices:", otherIndices); // Debugging line
 
     const fullMap = { ...config.categories };
-    if (otherIndices.length > 0) {
-      fullMap["Others"] = otherIndices;
-    }
+    // if (otherIndices.length > 0) {
+    //   fullMap["Others"] = otherIndices;
+    // }
 
     const filtered: CategoryMap = {};
     Object.entries(fullMap).forEach(([cat, list]) => {

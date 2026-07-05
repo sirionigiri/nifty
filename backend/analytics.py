@@ -59,7 +59,7 @@ CATEGORY_MAP = {
     ],
     "International Indices": [
         "S&P 500", "Nasdaq 100 Futures", "Bitcoin", "Gold", "Silver", 
-        "EEM", "KOSPI", "Shanghai Composite", "Bovespa", "TAIEX", "MEXICO IPC",
+        "EEM", "KOSPI", "Shanghai Composite", "Bovespa", "TAIEX", "Mexico IPC", "S&P Europe 350",
     ],
 }
 
