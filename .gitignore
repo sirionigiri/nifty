@@ -1,2 +1,16 @@
 .env
 node_modules/
+# AMFI datasets
+backend/amfi_fund_performance.csv
+backend/amfi_fund_performance_daily.csv
+backend/amfi_fund_performance.parquet
+backend/amfi_fund_performance_daily.parquet
+
+# Any temporary/alternate versions
+backend/amfi_fund_performance_*
+backend/amfi_raw_monthend*
+backend/amfi_checkpoint*
+backend/amfi_errors*
+
+# Old AMFI data
+backend/amfi data old/
