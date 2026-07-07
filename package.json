@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "d3-force": "^3.0.0",
+    "echarts": "^6.1.0",
+    "echarts-for-react": "^3.0.6"
+  },
+  "devDependencies": {
+    "@types/d3-force": "^3.0.10"
+  }
+}
