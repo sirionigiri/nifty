@@ -2,15 +2,20 @@
 NSE Screener Backend — FastAPI
 Endpoints: /api/config, /api/summary, /api/metrics, /api/valuation-data,
            /api/nav-data, /api/scatter-data, /api/calendar-returns,
-           /api/rankings, /api/generate-report
+           /api/rankings, /api/generate-report, /api/mf-config, /api/mf-data,
+           /api/health, /api/admin/reload
 """
 
 # ── Standard Library ──────────────────────────────────────────────────────────
 import io
 import logging
 import os
+import re
 import time
 import bisect
+import random
+import asyncio
+import traceback
 
 # ── Third-Party ───────────────────────────────────────────────────────────────
 import httpx
@@ -20,7 +25,7 @@ import duckdb
 import xlsxwriter
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse, StreamingResponse
+from fastapi.responses import ORJSONResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from typing import List, Optional
@@ -44,15 +49,6 @@ from analytics import (
     _get_last
 )
 
-URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/international_data.parquet"
-
-URL_MF = "https://raw.githubusercontent.com/sirionigiri/mf-data/main/amfi_fund_performance_daily.parquet"
-
-MF_KEEP_COLS = [
-    '_date', 'schemeName', '_maturityType', '_category', '_subCategory',
-       'benchmark', 'riskometerScheme', 'navDate',
-       'navRegular', 'return1YearRegular', 'return3YearRegular',  'return5YearRegular', 'return10YearRegular'
-]
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,14 +58,31 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SOURCE URLS (raw GitHub — mirrored through jsDelivr at fetch time, see below)
+# ─────────────────────────────────────────────────────────────────────────────
+
+URL_RETURNS = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/nifty_data.parquet"
+URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/international_data.parquet"
+URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/valuation_data.parquet"
+URL_MF = "https://raw.githubusercontent.com/sirionigiri/mf-data/main/amfi_fund_performance_daily.parquet"
+
+FETCH_TIMEOUT = 60
+MAX_RETRIES_PER_HOST = 3
+
+# ─────────────────────────────────────────────────────────────────────────────
 # APP & MIDDLEWARE
 # ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(default_response_class=ORJSONResponse)
 
+# Allow overriding CORS origins via env var in production without a code
+# change; defaults to "*" to preserve existing behavior.
+_allowed_origins = os.environ.get("ALLOWED_ORIGINS", "*")
+ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins.split(",")] if _allowed_origins != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production replace "*" with your Vercel URL
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -100,23 +113,37 @@ async def add_process_time_header(request: Request, call_next):
     return response
 
 
+# Global safety net: any exception that escapes an endpoint (a bug we didn't
+# anticipate, a third-party library raising something unexpected, etc.)
+# gets logged with a full traceback and turned into a clean JSON 500
+# instead of crashing the worker or leaking a raw stack trace to the client.
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error(f"UNHANDLED EXCEPTION on {request.method} {request.url.path}: {exc}")
+    logger.error(traceback.format_exc())
+    return JSONResponse(status_code=500, content={"error": "internal_server_error", "detail": str(exc)})
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-URL_RETURNS = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/nifty_data.parquet"
-URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/valuation_data.parquet"
-
 # In-memory data store populated at startup
 DATA = {}
+
+# Per-dataset load status, surfaced via /api/health so failures are
+# observable instead of silently leaving stale/empty data in place.
+DATA_STATUS = {}
+
+_startup_lock = asyncio.Lock()
 
 # Local path where the MF parquet file is downloaded once at startup.
 # DuckDB queries this file directly on every request — it reads only the
 # columns/rows a given query asks for (columnar + predicate pushdown), so
-# the full ~7M-row / ~34MB file is NEVER materialized into a pandas
+# the full multi-million-row file is NEVER materialized into a pandas
 # DataFrame in process memory. Only small per-request result sets
-# (a single day's ~2,000-row snapshot, or a filtered/paginated slice of it)
-# ever exist in memory, and only for the duration of that request.
+# (a single day's snapshot, or a filtered/paginated slice of it) ever
+# exist in memory, and only for the duration of that request.
 MF_PARQUET_PATH = "/tmp/mf_data.parquet"
 
 # Columns returned by MF queries (mirrors what the frontend/report consume)
@@ -140,6 +167,11 @@ ALLOWED_MF_SORT_COLS = {
     "schemeName", "benchmark", "riskometerScheme", "navRegular",
     "return1YearRegular", "return3YearRegular", "return5YearRegular", "return10YearRegular",
 }
+
+# Optional token to protect the manual reload endpoint. If unset, the
+# endpoint is open — fine for internal/staging use, but set RELOAD_TOKEN
+# in production.
+RELOAD_TOKEN = os.environ.get("RELOAD_TOKEN")
 
 # Maps index names to human-readable sector/type labels used in the Excel report
 REPORT_SECTOR_MAP = {
@@ -207,7 +239,7 @@ MF_MAP = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REQUEST MODEL
+# REQUEST MODELS
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MetricsRequest(BaseModel):
@@ -218,8 +250,6 @@ class MetricsRequest(BaseModel):
     reference_date: Optional[str] = None
     include_mf: Optional[bool] = False
     # Optional MF filters for the report's "Mutual Funds" sheet.
-    # Previously referenced via request.mf_search etc. without being
-    # declared on the model — added here so generate_report doesn't 500.
     mf_search: Optional[str] = ""
     mf_subcategories: Optional[List[int]] = []
     mf_riskometers: Optional[List[str]] = []
@@ -238,20 +268,94 @@ class MFDataRequest(BaseModel):
     sort_by: str = "return1YearRegular"
     sort_dir: str = "desc"
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
+# NETWORK HELPERS — retry, fallback, validation
 # ─────────────────────────────────────────────────────────────────────────────
+
+def to_jsdelivr(raw_url: str) -> str:
+    """Convert a raw.githubusercontent.com URL into its jsDelivr GitHub-CDN
+    equivalent. jsDelivr fronts GitHub content behind a real CDN and is far
+    less prone to the 429s that raw.githubusercontent.com hands out —
+    especially from shared IP ranges like Vercel's, where you get rate
+    limited by *other* tenants' traffic, not just your own."""
+    m = re.match(r"https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)", raw_url)
+    if not m:
+        return raw_url
+    user, repo, branch, path = m.groups()
+    return  raw_url
+
+
+def build_source_urls(raw_url: str) -> list:
+    """Ordered list of candidate URLs for a file: jsDelivr first (CDN,
+    rate-limit resistant), falling back to the original raw GitHub URL if
+    jsDelivr ever fails, is stale, or hasn't picked up a brand-new file yet."""
+    jsdelivr_url = to_jsdelivr(raw_url)
+    return [jsdelivr_url, raw_url] if jsdelivr_url != raw_url else [raw_url]
+
+
+async def fetch_parquet_bytes(
+    client: httpx.AsyncClient,
+    candidate_urls: list,
+    timeout: int = FETCH_TIMEOUT,
+    max_retries: int = MAX_RETRIES_PER_HOST,
+) -> bytes:
+    """Fetch a parquet file, trying each candidate URL in turn with
+    retry+backoff on transient failures (429s, timeouts, connection errors).
+    Validates the response actually looks like parquet (size + magic bytes)
+    before returning it, so a rate-limit page or CDN error page fails loudly
+    and clearly here instead of crashing deep inside pyarrow with a cryptic
+    'magic bytes not found in footer' error."""
+    last_exc = None
+    for url in candidate_urls:
+        for attempt in range(max_retries):
+            try:
+                res = await client.get(url, timeout=timeout)
+                if res.status_code == 429:
+                    retry_after = res.headers.get("Retry-After")
+                    wait = float(retry_after) if retry_after else (2 ** attempt) + random.random()
+                    logger.warning(f"429 from {url} (attempt {attempt + 1}/{max_retries}), waiting {wait:.1f}s")
+                    await asyncio.sleep(wait)
+                    continue
+                res.raise_for_status()
+                content = res.content
+                if len(content) < 1024 or not content.startswith(b"PAR1"):
+                    raise ValueError(
+                        f"Response from {url} doesn't look like valid parquet "
+                        f"({len(content)} bytes) — likely rate-limited or an error page."
+                    )
+                return content
+            except (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException, ValueError) as e:
+                last_exc = e
+                wait = (2 ** attempt) + random.random()
+                logger.warning(f"Fetch failed for {url} (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(wait)
+        logger.warning(f"Exhausted retries for {url}, trying next source if any remain")
+    raise RuntimeError(f"Failed to fetch parquet from all candidates: {candidate_urls}") from last_exc
+
+
+def _mark_status(key: str, ok: bool, error: Exception = None):
+    DATA_STATUS[key] = {
+        "ok": ok,
+        "loaded_at": pd.Timestamp.utcnow().isoformat(),
+        "error": f"{type(error).__name__}: {error}" if error else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GENERAL HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
 def get_perf_row_data(idx, ed, periods, benchmark):
     """Gathers performance data for a single index across multiple periods."""
     results = []
     for p in periods:
         try:
             if p == "Rolling 3-Yr Avg":
-                # Uses the pre-imported calc_rolling3_metric
                 val = calc_rolling3_metric(DATA['rebased'], DATA['returns'], 'cagr', [idx], benchmark, ed)[idx]
             else:
                 sd = get_start_date(p, ed)
-                # Handle start dates for Absolute vs CAGR periods
                 if p == "MTD":
                     sd_calc = pd.Timestamp(f"{ed.year}-{ed.month:02d}-01")
                 elif p == "YTD":
@@ -283,175 +387,234 @@ def clean_float(val) -> Optional[float]:
     return round(float(val), 2)
 
 
-def get_mf_snapshot(effective_ed: pd.Timestamp):
-    """Return (df_snapshot, actual_snapshot_date) for the most recent
-    available MF data on or before effective_ed.
+def require_data(*keys: str):
+    """Raise a clear, specific 503 naming exactly which dataset is missing,
+    instead of a generic 'service unavailable'. Use at the top of any
+    endpoint that depends on startup-loaded data."""
+    missing = [k for k in keys if k not in DATA]
+    if missing:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Data not ready: {', '.join(missing)}. Check /api/health.",
+        )
 
-    IMPORTANT (memory): this slices rows out of a single retained
-    DataFrame (DATA['mf_full']) using precomputed integer-position
-    arrays (DATA['mf_date_indices']). It does NOT keep a separate
-    DataFrame per date in memory — with 7M+ rows across many dates,
-    materializing one DataFrame per date (the old approach) roughly
-    doubled peak memory during construction and permanently retained
-    N full copies of the data afterward.
-    """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DUCKDB HELPERS — mutual fund data lives entirely on disk, queried on demand
+# ─────────────────────────────────────────────────────────────────────────────
+
+def mf_query(sql: str, params: list = None) -> pd.DataFrame:
+    """Run a SQL query against the MF parquet file via a fresh, lightweight
+    DuckDB connection. DuckDB reads parquet column-by-column with predicate
+    pushdown, so this only materializes the columns/rows the query actually
+    asks for — never the full multi-million-row file — keeping memory flat
+    regardless of how large the underlying dataset grows. A fresh connection
+    per call keeps this safe to run concurrently across request threads."""
+    con = duckdb.connect()
+    try:
+        return con.execute(sql, params or []).df()
+    except Exception as e:
+        logger.error(f"DuckDB query failed: {e}\nSQL: {sql}\nParams: {params}")
+        raise
+    finally:
+        con.close()
+
+
+def find_mf_snapshot_date(effective_ed: pd.Timestamp):
+    """Return the most recent MF snapshot date on or before effective_ed."""
     dates = DATA.get('mf_dates')
     if not dates:
-        return None, None
+        return None
     idx = bisect.bisect_right(dates, effective_ed) - 1
     if idx < 0:
-        return None, None
-    snap_date = dates[idx]
-    row_positions = DATA['mf_date_indices'][snap_date]
-    snapshot = DATA['mf_full'].iloc[row_positions].reset_index(drop=True)
-    return snapshot, snap_date
+        return None
+    return dates[idx]
+
+
+def build_mf_where_clause(search, subcategories, riskometers, benchmarks, snap_date):
+    """Shared WHERE-clause builder for /api/mf-data and the report's MF
+    sheet, so filter semantics can't drift between the two call sites."""
+    clauses = ["_date = ?"]
+    params = [snap_date]
+
+    if search:
+        clauses.append("schemeName ILIKE ?")
+        params.append(f"%{search}%")
+    if subcategories:
+        placeholders = ",".join(["?"] * len(subcategories))
+        clauses.append(f"_subCategory IN ({placeholders})")
+        params.extend(subcategories)
+    if riskometers:
+        placeholders = ",".join(["?"] * len(riskometers))
+        clauses.append(f"riskometerScheme IN ({placeholders})")
+        params.extend(riskometers)
+    if benchmarks:
+        placeholders = ",".join(["?"] * len(benchmarks))
+        clauses.append(f"benchmark IN ({placeholders})")
+        params.extend(benchmarks)
+
+    return " AND ".join(clauses), params
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STARTUP — load data into memory
+# STARTUP — per-dataset loaders, isolated so one failure can't sink the rest
 # ─────────────────────────────────────────────────────────────────────────────
+
+async def load_market_data(client: httpx.AsyncClient):
+    """NIFTY (required) + International (best-effort) -> rebased/returns/yearly."""
+    content = await fetch_parquet_bytes(client, build_source_urls(URL_RETURNS))
+    df_nifty_raw = pd.read_parquet(io.BytesIO(content))
+    df_nifty_raw['Date'] = pd.to_datetime(df_nifty_raw['Date'])
+    df_nifty_raw.columns = [c.strip() for c in df_nifty_raw.columns]
+
+    prep = load_and_prepare(df_nifty_raw)
+    nifty_wide = prep['rebased']
+    combined_wide = nifty_wide
+
+    try:
+        intl_content = await fetch_parquet_bytes(client, build_source_urls(URL_INTL))
+        df_intl_raw = pd.read_parquet(io.BytesIO(intl_content))
+
+        if isinstance(df_intl_raw.columns, pd.MultiIndex):
+            df_intl_raw.columns = df_intl_raw.columns.get_level_values(-1)
+
+        df_intl_raw.index = pd.to_datetime(df_intl_raw.index)
+        df_intl_raw.index.name = 'Date'
+
+        df_intl_rebased = df_intl_raw.apply(
+            lambda col: col / col.dropna().iloc[0] * 100 if col.dropna().size > 0 else col
+        )
+
+        combined_wide = pd.concat([nifty_wide, df_intl_rebased], axis=1).sort_index()
+        combined_wide = combined_wide.loc[:, ~combined_wide.columns.duplicated()].copy()
+        combined_wide = combined_wide.ffill()
+        logger.info("✅ International data merged.")
+    except Exception as intl_err:
+        logger.warning(f"⚠️ International data unavailable, continuing with NIFTY-only universe: {intl_err}")
+
+    DATA['rebased'] = combined_wide
+    DATA['returns'] = (combined_wide.pct_change(fill_method=None).ffill() * 100).round(4)
+    DATA['yearly'] = _calc_yearly(combined_wide)
+    DATA['end_date'] = combined_wide.index.max()
+    DATA['indices'] = sorted(combined_wide.columns.tolist())
+    _mark_status('market', True)
+    logger.info(f"🚀 Market data ready: {len(DATA['indices'])} assets.")
+
+
+async def load_valuation_data(client: httpx.AsyncClient):
+    content = await fetch_parquet_bytes(client, build_source_urls(URL_VALUATION))
+    df_v = pd.read_parquet(io.BytesIO(content))
+    if 'Date' not in df_v.columns and df_v.index.name == 'Date':
+        df_v = df_v.reset_index()
+    df_v['Date'] = pd.to_datetime(df_v['Date'])
+    df_v['Index_Name'] = df_v['Index_Name'].astype(str).str.strip()
+    DATA['valuation'] = df_v
+    _mark_status('valuation', True)
+    logger.info("✅ Valuation data ready.")
+
+
+async def load_mf_data(client: httpx.AsyncClient):
+    """Download the MF parquet to local disk and index its snapshot dates +
+    filter facets via DuckDB. The file itself is never loaded into pandas —
+    every request-time read goes straight through DuckDB against this path."""
+    content = await fetch_parquet_bytes(client, build_source_urls(URL_MF))
+
+    os.makedirs(os.path.dirname(MF_PARQUET_PATH) or ".", exist_ok=True)
+    tmp_path = MF_PARQUET_PATH + ".tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(content)
+    os.replace(tmp_path, MF_PARQUET_PATH)  # atomic swap — never leaves a half-written file in place
+
+    dates_df = mf_query(f"SELECT DISTINCT _date FROM read_parquet('{MF_PARQUET_PATH}') ORDER BY _date")
+    mf_dates = [pd.Timestamp(d) for d in dates_df['_date']]
+    if not mf_dates:
+        raise RuntimeError("MF parquet downloaded but contains no dates")
+
+    latest_date = mf_dates[-1]
+    cfg_df = mf_query(
+        """
+        SELECT DISTINCT _subCategory, riskometerScheme, benchmark
+        FROM read_parquet(?)
+        WHERE _date = ?
+          AND _subCategory IS NOT NULL
+          AND riskometerScheme IS NOT NULL
+          AND benchmark IS NOT NULL
+        """,
+        [MF_PARQUET_PATH, latest_date],
+    )
+
+    DATA['mf_dates'] = mf_dates
+    DATA['mf_parquet_path'] = MF_PARQUET_PATH
+    DATA['mf_config'] = {
+        "categories": MF_MAP,
+        "riskometers": sorted(cfg_df['riskometerScheme'].dropna().unique().tolist()),
+        "benchmarks": sorted(cfg_df['benchmark'].dropna().unique().tolist()),
+        "facets": [
+            {
+                "subcategory": int(row['_subCategory']),
+                "riskometer": row['riskometerScheme'],
+                "benchmark": row['benchmark'],
+            }
+            for _, row in cfg_df.iterrows()
+        ],
+    }
+    _mark_status('mf', True)
+    logger.info(
+        f"✅ MF data ready via DuckDB: {len(mf_dates)} snapshot dates, "
+        f"{os.path.getsize(MF_PARQUET_PATH) / 1e6:.1f} MB on disk (not held in process memory)."
+    )
+
 
 @app.on_event("startup")
 async def startup_event():
-    async with httpx.AsyncClient() as client:
-        try:
-            # 1. Load NIFTY Returns (Long format: Date, Index_Name, Total_Returns_Index)
-            logger.info("📡 Loading NIFTY Data...")
-            res1 = await client.get(URL_RETURNS, timeout=60)
-            df_nifty_raw = pd.read_parquet(io.BytesIO(res1.content))
+    async with _startup_lock:
+        async with httpx.AsyncClient() as client:
+            # Run all three loaders concurrently and independently: a
+            # failure in one (return_exceptions=True) can't block or crash
+            # the others, and total startup time is roughly the slowest
+            # single loader instead of the sum of all three.
+            labels = ["market", "valuation", "mf"]
+            tasks = [load_market_data(client), load_valuation_data(client), load_mf_data(client)]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Ensure Nifty Date is datetime and handle whitespace
-            df_nifty_raw['Date'] = pd.to_datetime(df_nifty_raw['Date'])
-            df_nifty_raw.columns = [c.strip() for c in df_nifty_raw.columns]
+            for label, result in zip(labels, results):
+                if isinstance(result, Exception):
+                    logger.error(f"❌ {label} load failed: {result}")
+                    logger.error("".join(traceback.format_exception(type(result), result, result.__traceback__)))
+                    _mark_status(label, False, result)
 
-            # Use your existing prep engine to get the "Wide" rebased Nifty dataframe
-            prep = load_and_prepare(df_nifty_raw)
-            nifty_wide = prep['rebased']  # This has Date as Index
+    if 'rebased' not in DATA:
+        logger.error("❌ CRITICAL: market data failed to load — most endpoints will return 503.")
+    else:
+        logger.info("🚀 ENGINE READY.")
 
-            # 2. Load International Data (Wide format: Date is Index)
-            logger.info("📡 Loading International Data...")
-            res_intl = await client.get(URL_INTL, timeout=60)
-            if res_intl.status_code == 200:
-                df_intl_raw = pd.read_parquet(io.BytesIO(res_intl.content))
 
-                # If 'Ticker' is a level name (multi-index), flatten it
-                if isinstance(df_intl_raw.columns, pd.MultiIndex):
-                    df_intl_raw.columns = df_intl_raw.columns.get_level_values(-1)
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINTS — health & ops
+# ─────────────────────────────────────────────────────────────────────────────
 
-                # Ensure the index (Date) is datetime
-                df_intl_raw.index = pd.to_datetime(df_intl_raw.index)
-                df_intl_raw.index.name = 'Date'
+@app.get("/api/health")
+def health():
+    return {
+        "status": "ok" if 'rebased' in DATA else "degraded",
+        "datasets": DATA_STATUS,
+        "assets_loaded": len(DATA.get('indices', [])),
+        "valuation_available": 'valuation' in DATA,
+        "mf_available": 'mf_dates' in DATA,
+        "mf_snapshot_count": len(DATA.get('mf_dates', [])),
+    }
 
-                # Rebase International Indices to 100 at their own inception
-                df_intl_rebased = df_intl_raw.apply(
-                    lambda col: col / col.dropna().iloc[0] * 100 if col.dropna().size > 0 else col
-                )
 
-                # 3. MERGE Nifty Wide + International Wide
-                combined_wide = pd.concat([nifty_wide, df_intl_rebased], axis=1).sort_index()
-                combined_wide = combined_wide.loc[:, ~combined_wide.columns.duplicated()].copy()
-
-                # Fill weekend/holiday gaps so indices are comparable on any given day
-                combined_wide = combined_wide.ffill()
-
-                logger.info("✅ Data merged successfully.")
-            else:
-                combined_wide = nifty_wide
-                logger.warning("⚠️ Intl data fetch failed. Using Nifty only.")
-
-            # 4. Finalize global store (index/returns engine)
-            DATA['rebased'] = combined_wide
-            DATA['returns'] = (combined_wide.pct_change(fill_method=None).ffill() * 100).round(4)
-            DATA['yearly'] = _calc_yearly(combined_wide)
-            DATA['end_date'] = combined_wide.index.max()
-            DATA['indices'] = sorted(combined_wide.columns.tolist())
-
-            # 5. Load Mutual Fund Data — isolated so a failure here can't take down the rest
-            #
-            # MEMORY NOTES:
-            #   a) Only read the columns we actually use anywhere in this file
-            #      (MF_KEEP_COLS) instead of all ~50 columns in the source
-            #      parquet. This is the biggest single win — cuts memory
-            #      roughly in proportion to columns dropped (~80% here).
-            #   b) Downcast dtypes: repeated string columns -> category,
-            #      float64 -> float32. Categoricals store each distinct
-            #      string once and reference it by a small integer code,
-            #      instead of one Python object per cell.
-            #   c) Do NOT split into one DataFrame per date. Instead keep
-            #      a single DataFrame (mf_full) and store only integer row
-            #      positions per date (mf_date_indices) via groupby(...).indices,
-            #      which is effectively free compared to copying data.
-            logger.info("📡 Loading Mutual Fund Data...")
-            try:
-                res_mf = await client.get(URL_MF, timeout=60)
-                res_mf.raise_for_status()
-
-                mf_raw = pd.read_parquet(
-                    io.BytesIO(res_mf.content),
-                    columns=[c for c in MF_KEEP_COLS],  # column pruning at read time
-                )
-
-                mf_raw['_date'] = pd.to_datetime(mf_raw['_date'])
-
-                # Downcast heavy repeated-string columns to category.
-                # IMPORTANT: schemeName looks high-cardinality (one per fund)
-                # but is actually low-cardinality ACROSS THE FULL HISTORY —
-                # each of the ~2,000 distinct fund names repeats once per
-                # snapshot date (~3,800 dates), so it's stored ~3,800x over
-                # as a full Python string object per occurrence. This single
-                # column was responsible for the vast majority of the 1GB
-                # footprint. Categorical dtype stores each unique string once
-                # and references it by a small int code per row instead.
-                for col in ['benchmark', 'riskometerScheme', 'schemeName']:
-                    if col in mf_raw.columns:
-                        mf_raw[col] = mf_raw[col].astype('category')
-
-                # _category / _subCategory are small integer codes — store compactly
-                for col in ['_category', '_subCategory']:
-                    if col in mf_raw.columns:
-                        mf_raw[col] = pd.to_numeric(mf_raw[col], errors='coerce').astype('float32')
-
-                # Downcast float64 numeric columns to float32 (halves their footprint)
-                float_cols = mf_raw.select_dtypes(include=['float64']).columns
-                if len(float_cols):
-                    mf_raw[float_cols] = mf_raw[float_cols].astype('float32')
-
-                mf_raw = mf_raw.reset_index(drop=True)
-
-                DATA['mf_full'] = mf_raw
-                DATA['mf_date_indices'] = mf_raw.groupby('_date').indices  # {Timestamp: np.array of row positions}
-                DATA['mf_dates'] = sorted(DATA['mf_date_indices'].keys())
-
-                # Reference snapshot (latest date) built the same cheap way
-                latest_date = DATA['mf_dates'][-1]
-                DATA['mf_reference'] = mf_raw.iloc[DATA['mf_date_indices'][latest_date]].reset_index(drop=True)
-
-                logger.info(
-                    f"✅ Mutual Fund data loaded: {len(DATA['mf_dates'])} snapshot dates, "
-                    f"{len(DATA['mf_reference'])} schemes on latest date, "
-                    f"{mf_raw.memory_usage(deep=True).sum() / 1e6:.1f} MB in memory."
-                )
-            except Exception as mf_err:
-                logger.error(f"⚠️ Mutual Fund load failed (MF tab will be unavailable): {mf_err}")
-
-            # 6. Load Valuations
-            logger.info("📡 Loading Valuation Data...")
-            res2 = await client.get(URL_VALUATION, timeout=60)
-            if res2.status_code == 200:
-                df_v = pd.read_parquet(io.BytesIO(res2.content))
-                # Ensure Valuation Date is also clean
-                if 'Date' not in df_v.columns and df_v.index.name == 'Date':
-                    df_v = df_v.reset_index()
-                df_v['Date'] = pd.to_datetime(df_v['Date'])
-                df_v['Index_Name'] = df_v['Index_Name'].astype(str).str.strip()
-                DATA["valuation"] = df_v
-
-            logger.info(f"🚀 ENGINE READY: {len(DATA['indices'])} Assets Loaded.")
-
-        except Exception as e:
-            import traceback
-            logger.error(f"❌ Startup Failure: {e}")
-            logger.error(traceback.format_exc())
+@app.post("/api/admin/reload")
+async def admin_reload(request: Request):
+    """Manually re-run startup loaders without redeploying — useful for
+    recovering from a transient source failure (e.g. all retries exhausted
+    during a GitHub outage) on an already-warm instance."""
+    if RELOAD_TOKEN:
+        if request.headers.get("X-Reload-Token") != RELOAD_TOKEN:
+            raise HTTPException(status_code=403, detail="Invalid or missing reload token")
+    await startup_event()
+    return {"status": "reload complete", "datasets": DATA_STATUS}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -460,14 +623,13 @@ async def startup_event():
 
 @app.get("/api/config")
 def get_config():
-    if "indices" not in DATA: raise HTTPException(503)
+    require_data("indices")
     return {"indices": DATA["indices"], "categories": CATEGORY_MAP}
 
 
 @app.get("/api/calendar-returns")
 def get_calendar_returns():
-    if "yearly" not in DATA:
-        raise HTTPException(status_code=503)
+    require_data("yearly")
     start = DATA["rebased"].index.min().strftime("%d %b %Y")
     end = DATA["rebased"].index.max().strftime("%d %b %Y")
     return {
@@ -482,8 +644,7 @@ def get_calendar_returns():
 
 @app.post("/api/summary")
 def get_summary_metrics(request: MetricsRequest):
-    if "rebased" not in DATA:
-        return {"error": "Data not loaded"}
+    require_data("rebased")
     try:
         effective_ed = get_effective_end_date(request.reference_date)
         df_rb = DATA["rebased"]
@@ -519,8 +680,7 @@ def get_summary_metrics(request: MetricsRequest):
 
 @app.post("/api/metrics")
 def get_metrics_table(request: MetricsRequest):
-    if "rebased" not in DATA:
-        raise HTTPException(status_code=503)
+    require_data("rebased")
     try:
         effective_ed = get_effective_end_date(request.reference_date)
 
@@ -528,7 +688,6 @@ def get_metrics_table(request: MetricsRequest):
         req_indices = [idx.strip().upper() for idx in request.indices]
         valid_indices = [c for c in all_cols if c.strip().upper() in req_indices]
 
-        # Robust benchmark matching
         bench_match = next(
             (c for c in all_cols if c.strip().upper() == request.benchmark.strip().upper()),
             "NIFTY 50",
@@ -547,7 +706,6 @@ def get_metrics_table(request: MetricsRequest):
             include_roll3=(request.metric != "mdd"),
         )
 
-        # 1. RUN CALCULATIONS
         if request.metric == "exc":
             df_c = build_table(metric="cagr", **kw)
             df_res = df_c.sub(df_c[bench_match], axis=0)
@@ -561,7 +719,6 @@ def get_metrics_table(request: MetricsRequest):
         else:
             df_res = build_table(metric=request.metric, **kw)
 
-        # 2. BUILD DYNAMIC DATE RANGE LABELS (Metadata)
         ed_str = effective_ed.strftime("%d %b %y")
         date_ranges = {}
         for p in df_res.index:
@@ -570,23 +727,17 @@ def get_metrics_table(request: MetricsRequest):
                 date_ranges[p] = f"Jan {yr - 2} - Dec {yr}"
             else:
                 target_sd = get_start_date(p, effective_ed)
-
-                # FIX: Check what date was actually used for the anchor (Benchmark)
-                # This unpacks the (Value, Date) tuple from our new _get_last
                 _, actual_sd = _get_last(DATA["rebased"][bench_match], target_sd)
 
-                # Determine what to show in the UI label
                 if p == "MTD":
                     sd_show = pd.Timestamp(f"{effective_ed.year}-{effective_ed.month:02d}-01")
                 elif p == "YTD":
                     sd_show = pd.Timestamp(f"{effective_ed.year}-01-01")
                 else:
-                    # If actual_sd is inception (newer than target), show inception date
                     sd_show = actual_sd if actual_sd else target_sd
 
                 date_ranges[p] = f"{sd_show.strftime('%d %b %y')} - {ed_str}"
 
-        # 3. FORMAT FINAL RESPONSE
         df_res = df_res.reset_index().rename(columns={"index": "Period"})
         df_res["Range"] = df_res["Period"].map(date_ranges)
 
@@ -595,7 +746,6 @@ def get_metrics_table(request: MetricsRequest):
             "error": None,
         }
     except Exception as e:
-        import traceback
         logger.error(f"Metrics Error: {traceback.format_exc()}")
         return {"data": [], "error": str(e)}
 
@@ -610,36 +760,31 @@ VALUATION_BOUNDS = {
 def clean_valuation_column(s: pd.Series, bounds: tuple) -> pd.Series:
     """Treat out-of-range values as missing, then forward-fill from prior valid data."""
     lo, hi = bounds
-    s = s.mask((s < lo) | (s > hi))   # garbage -> NaN, so ffill can replace it
+    s = s.mask((s < lo) | (s > hi))
     s = s.ffill()
     return s
 
 
 @app.post("/api/valuation-data")
 def get_val_data(request: MetricsRequest):
-    if 'valuation' not in DATA: raise HTTPException(503)
+    require_data("valuation")
     try:
         effective_ed = get_effective_end_date(request.reference_date)
         df_full = DATA['valuation']
 
-        # 1. Filter for Target Index
         df = df_full[df_full['Index_Name'].str.upper() == request.benchmark.upper()].sort_values('Date').copy()
         if df.empty: return {"error": f"No data for {request.benchmark}"}
 
-        # 2. Clean on the FULL history first (garbage -> NaN -> ffill),
-        #    so the window's leading rows have something valid to inherit from.
         for col, bounds in VALUATION_BOUNDS.items():
             if col in df.columns:
                 df[col] = clean_valuation_column(df[col], bounds)
 
-        # 3. Slice the Window
         period = request.periods[0] if request.periods else "5 Yr"
         sd = get_start_date(period, effective_ed)
         df_w = df[(df['Date'] >= sd) & (df['Date'] <= effective_ed)].copy()
 
         if df_w.empty: return {"error": "Insufficient data in selected window"}
 
-        # 4. STATS HELPER (unchanged — now works on cleaned data)
         def stats_for_window(s):
             clean_s = s.dropna()
             if clean_s.empty: return None
@@ -662,16 +807,16 @@ def get_val_data(request: MetricsRequest):
             "pb": {"values": [clean_float(v) for v in df_w['PB']], "stats": stats_for_window(df_w['PB'])},
             "dy": {"values": [clean_float(v) for v in df_w['Div_Yield']], "stats": stats_for_window(df_w['Div_Yield'])}
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/nav-data")
 def get_nav_data(request: MetricsRequest):
-    if "rebased" not in DATA:
-        raise HTTPException(status_code=503)
+    require_data("rebased")
 
     effective_ed = get_effective_end_date(request.reference_date)
     sd = get_start_date(request.periods[0], effective_ed)
@@ -691,7 +836,6 @@ def get_nav_data(request: MetricsRequest):
     if request.metric == "drawdown":
         df = (df / df.cummax() - 1) * 100
     else:
-        # Rebase each series to 100 at its first available point in the window
         df = df.apply(
             lambda col: col / col.dropna().iloc[0] * 100 if col.dropna().size > 0 else col
         )
@@ -705,8 +849,7 @@ def get_nav_data(request: MetricsRequest):
 
 @app.post("/api/scatter-data")
 def get_scatter_data(request: MetricsRequest):
-    if "rebased" not in DATA:
-        return []
+    require_data("rebased")
 
     effective_ed = get_effective_end_date(request.reference_date)
     sd = get_start_date(request.periods[0] if request.periods else "5 Yr", effective_ed)
@@ -728,54 +871,48 @@ def get_scatter_data(request: MetricsRequest):
 @app.post("/api/rankings")
 def get_calendar_rankings(request: MetricsRequest):
     try:
-        if 'yearly' not in DATA:
-            raise HTTPException(status_code=503)
+        require_data("yearly")
 
-        # 1. Extreme Name Matching
         all_cols = DATA['yearly'].columns.tolist()
-        # Clean names (remove hidden spaces) for matching
         selected = [s.strip() for s in request.indices]
         available_cols = [c for c in all_cols if c.strip() in selected]
 
         if not available_cols:
             return []
 
-        # 2. Slice and calculate ranks
-        # method='min' handles ties better for rankings
         df_selected = DATA['yearly'][available_cols].copy()
         rank_df = df_selected.rank(axis=1, ascending=False, method='min')
 
         results = []
         for year, row in rank_df.iterrows():
-            # Standardize the year label
-            y_label = str(year).split('-')[0] # Get just "2007" if it's a timestamp
+            y_label = str(year).split('-')[0]
             item = {"Year": y_label}
 
-            # Map the ranks found in this row
             valid_row = False
             for idx_name, rank_val in row.items():
                 if not np.isnan(rank_val):
                     item[f"Rank {int(rank_val)}"] = idx_name
                     valid_row = True
 
-            # Only add the year if there is at least one rank found
             if valid_row:
                 results.append(item)
 
         return results
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Rankings Error: {e}")
+        logger.error(f"Rankings Error: {e}")
         return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT — Excel report generation
 # ─────────────────────────────────────────────────────────────────────────────
+
 def create_matplotlib_gauge(current, min_val, max_val, median_val, reverse=False):
     """Creates a linear gauge with a black pointer and blue median line."""
 
     try:
-        # Normalize positions (0 to 1)
         pos = (current - min_val) / (max_val - min_val) if max_val != min_val else 0.5
         pos_med = (median_val - min_val) / (max_val - min_val) if max_val != min_val else 0.5
 
@@ -786,128 +923,46 @@ def create_matplotlib_gauge(current, min_val, max_val, median_val, reverse=False
 
     fig, ax = plt.subplots(figsize=(4, 0.8))
 
-    # Gradient bar
     cmap = "RdYlGn_r" if not reverse else "RdYlGn"
     cmap_obj = plt.get_cmap(cmap)
 
     gradient = np.linspace(0, 1, 256).reshape(1, -1)
-    ax.imshow(
-        gradient,
-        aspect="auto",
-        extent=[0, 1, 0, 0.25],
-        cmap=cmap_obj,
-    )
+    ax.imshow(gradient, aspect="auto", extent=[0, 1, 0, 0.25], cmap=cmap_obj)
 
-    # Median line
-    ax.plot(
-        [pos_med, pos_med],
-        [0, 0.25],
-        color="#2563eb",
-        linewidth=2.5,
-        zorder=11,
-    )
+    ax.plot([pos_med, pos_med], [0, 0.25], color="#2563eb", linewidth=2.5, zorder=11)
 
-    # Current value pointer
-    ax.scatter(
-        pos,
-        0.35,
-        marker="v",
-        s=200,
-        color="black",
-        zorder=12,
-    )
+    ax.scatter(pos, 0.35, marker="v", s=200, color="black", zorder=12)
 
-    txt_style = {
-        "fontsize": 9,
-        "fontweight": "bold",
-        "family": "sans-serif",
-    }
+    txt_style = {"fontsize": 9, "fontweight": "bold", "family": "sans-serif"}
 
-    # Min / Max labels
-    ax.text(
-        0,
-        0.5,
-        f"{min_val:.1f}",
-        ha="left",
-        color="#64748b",
-        **txt_style,
-    )
+    ax.text(0, 0.5, f"{min_val:.1f}", ha="left", color="#64748b", **txt_style)
+    ax.text(1, 0.5, f"{max_val:.1f}", ha="right", color="#64748b", **txt_style)
 
-    ax.text(
-        1,
-        0.5,
-        f"{max_val:.1f}",
-        ha="right",
-        color="#64748b",
-        **txt_style,
-    )
-
-    # Determine background brightness at current position
     bg_rgb = cmap_obj(pos)[:3]
-    luminance = (
-        0.2126 * bg_rgb[0]
-        + 0.7152 * bg_rgb[1]
-        + 0.0722 * bg_rgb[2]
-    )
+    luminance = 0.2126 * bg_rgb[0] + 0.7152 * bg_rgb[1] + 0.0722 * bg_rgb[2]
 
     text_color = "black" if luminance > 0.55 else "white"
     outline_color = "white" if text_color == "black" else "black"
 
-    # Current value label
     current_text = ax.text(
-        pos,
-        0.1,
-        f"{current:.1f}",
-        ha="center",
-        va="center",
-        color=text_color,
-        zorder=20,
-        **txt_style,
+        pos, 0.1, f"{current:.1f}", ha="center", va="center",
+        color=text_color, zorder=20, **txt_style,
     )
+    current_text.set_path_effects([pe.withStroke(linewidth=2, foreground=outline_color)])
 
-    current_text.set_path_effects([
-        pe.withStroke(
-            linewidth=2,
-            foreground=outline_color,
-        )
-    ])
-
-    # Median label
     med_text = ax.text(
-        pos_med,
-        0.45,
-        "MED",
-        ha="center",
-        color="#2563eb",
-        fontsize=7,
-        fontweight="black",
-        zorder=20,
+        pos_med, 0.45, "MED", ha="center", color="#2563eb",
+        fontsize=7, fontweight="black", zorder=20,
     )
-
-    med_text.set_path_effects([
-        pe.withStroke(
-            linewidth=1.5,
-            foreground="white",
-        )
-    ])
+    med_text.set_path_effects([pe.withStroke(linewidth=1.5, foreground="white")])
 
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-0.1, 0.7)
     ax.axis("off")
 
     buf = io.BytesIO()
-
-    plt.savefig(
-        buf,
-        format="png",
-        bbox_inches="tight",
-        pad_inches=0.02,
-        transparent=True,
-        dpi=120,
-    )
-
+    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.02, transparent=True, dpi=120)
     plt.close(fig)
-
     buf.seek(0)
     return buf
 
@@ -929,10 +984,15 @@ FACTOR_RANK_MAP = {
 }
 
 
+# NOTE: this is a plain `def`, not `async def`. Nothing in its body awaits
+# anything — it's pure CPU/IO-bound work (DuckDB queries, matplotlib
+# rendering, xlsxwriter). As `async def`, that work would run directly on
+# the event loop and block every other concurrent request for however long
+# the report takes to build. As a sync `def`, FastAPI automatically runs it
+# in the default threadpool, keeping the event loop free.
 @app.post("/api/generate-report")
-async def generate_report(request: MetricsRequest):
-    if "rebased" not in DATA:
-        raise HTTPException(status_code=503, detail="Server data not loaded")
+def generate_report(request: MetricsRequest):
+    require_data("rebased")
 
     try:
         effective_ed = get_effective_end_date(request.reference_date)
@@ -941,7 +1001,6 @@ async def generate_report(request: MetricsRequest):
         output = io.BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
 
-        # --- FORMATS ---
         title_f = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': 'black', 'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 12})
         head_f  = workbook.add_format({'bold': True, 'bg_color': '#F2F2F2', 'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 9})
         text_f  = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'font_size': 9})
@@ -950,12 +1009,10 @@ async def generate_report(request: MetricsRequest):
         rank_f  = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter', 'font_size': 8, 'text_wrap': True})
         italic_f = workbook.add_format({'italic': True, 'font_size': 8, 'text_wrap': True})
 
-        # --- CATEGORIZE INDICES ---
         factor_list = list(FACTOR_RANK_MAP.keys())
         s_indices = [idx for idx in request.indices if idx not in factor_list]
         f_indices = [idx for idx in request.indices if idx in factor_list]
 
-        # Bench fallback + ensure it leads both lists
         bench = request.benchmark if request.benchmark in DATA['rebased'].columns else "NIFTY 50"
         if bench not in s_indices: s_indices.insert(0, bench)
         if bench not in f_indices: f_indices.insert(0, bench)
@@ -969,7 +1026,7 @@ async def generate_report(request: MetricsRequest):
         ws1.set_column('I:K', 32)
 
         ws1.merge_range('A1:K1', 'Sector & Thematic Dashboard', title_f)
-        ws1.merge_range(1, 1, 1, num_periods,             'Performance (%)',            head_f)
+        ws1.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
         ws1.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Valuations (5Y Linear Gauge)', head_f)
         ws1.write_row('A3', ["Indices"] + request.periods + ["P/E", "P/B", "DY"], head_f)
 
@@ -979,28 +1036,29 @@ async def generate_report(request: MetricsRequest):
             ws1.write(row_idx, 0, idx, text_f)
             ws1.write_row(row_idx, 1, get_perf_row_data(idx, effective_ed, request.periods, bench), perc_f)
             try:
-                v_df = DATA['valuation']
-                hist = v_df[
-                    (v_df['Index_Name'].str.upper() == idx.upper()) &
-                    (v_df['Date'] >= five_yrs_ago) &
-                    (v_df['Date'] <= effective_ed)
-                ]
-                if not hist.empty:
-                    for i, col in enumerate(['PE', 'PB', 'Div_Yield']):
-                        ser = hist[col].dropna()
-                        if not ser.empty:
-                            img = create_matplotlib_gauge(
-                                ser.iloc[-1], ser.min(), ser.max(), ser.median(),
-                                reverse=(col == 'Div_Yield')
-                            )
-                            ws1.insert_image(
-                                row_idx, 1 + num_periods + i,
-                                f"s1_{row_idx}_{i}.png",
-                                {'image_data': img, 'x_scale': 0.7, 'y_scale': 0.7,
-                                 'x_offset': 10, 'y_offset': 5}
-                            )
-            except:
-                pass
+                v_df = DATA.get('valuation')
+                if v_df is not None:
+                    hist = v_df[
+                        (v_df['Index_Name'].str.upper() == idx.upper()) &
+                        (v_df['Date'] >= five_yrs_ago) &
+                        (v_df['Date'] <= effective_ed)
+                    ]
+                    if not hist.empty:
+                        for i, col in enumerate(['PE', 'PB', 'Div_Yield']):
+                            ser = hist[col].dropna()
+                            if not ser.empty:
+                                img = create_matplotlib_gauge(
+                                    ser.iloc[-1], ser.min(), ser.max(), ser.median(),
+                                    reverse=(col == 'Div_Yield')
+                                )
+                                ws1.insert_image(
+                                    row_idx, 1 + num_periods + i,
+                                    f"s1_{row_idx}_{i}.png",
+                                    {'image_data': img, 'x_scale': 0.7, 'y_scale': 0.7,
+                                     'x_offset': 10, 'y_offset': 5}
+                                )
+            except Exception as gauge_err:
+                logger.warning(f"Gauge render skipped for {idx}: {gauge_err}")
             row_idx += 1
 
         ws1.merge_range(
@@ -1009,7 +1067,6 @@ async def generate_report(request: MetricsRequest):
             italic_f
         )
 
-        # Sector Rankings Matrix
         ws1.write(26, 0, "Ranking of Thematic/Sector Portfolios (Strict Universe)", workbook.add_format({'bold': True}))
         years = [str(y) for y in range(2016, effective_ed.year)] + [f"{effective_ed.year} (YTD)"]
         ws1.write_row(27, 0, ["Year"] + [f"Rank {i+1}" for i in range(6)], head_f)
@@ -1033,7 +1090,7 @@ async def generate_report(request: MetricsRequest):
         ws2.set_column('B:M', 12)
 
         ws2.merge_range('A1:K1', 'Factor Dashboard', title_f)
-        ws2.merge_range(1, 1, 1, num_periods,             'Performance (%)',                head_f)
+        ws2.merge_range(1, 1, 1, num_periods, 'Performance (%)', head_f)
         ws2.merge_range(1, 1 + num_periods, 1, 3 + num_periods, 'Risk Metrics (Since Inception)', head_f)
         ws2.write_row('A3', ["Factor Indices"] + request.periods + ["Volatility", "Risk-Adj", "Max DD"], head_f)
 
@@ -1048,11 +1105,10 @@ async def generate_report(request: MetricsRequest):
                 c_val   = calc_cagr(DATA['rebased'], incept, effective_ed, [idx])[idx]
                 ra_val  = clean_float(c_val / v_val) if v_val else 0
                 ws2.write_row(row_idx, 1 + num_periods, [clean_float(v_val), ra_val, clean_float(m_val)], num_f)
-            except:
-                pass
+            except Exception as factor_err:
+                logger.warning(f"Factor row skipped for {idx}: {factor_err}")
             row_idx += 1
 
-        # Factor Rankings Matrix
         row_idx += 2
         ws2.write(row_idx, 0, "Ranking of Factor Portfolios (Strict Universe)", workbook.add_format({'bold': True}))
         for i, rd in enumerate(FACTOR_RANKS_STATIC):
@@ -1088,69 +1144,69 @@ async def generate_report(request: MetricsRequest):
                 ws3.write_row(row_idx, 2, get_perf_row_data(match, effective_ed, fixed_periods, bench), perc_f)
                 row_idx += 1
 
-        if request.include_mf and 'mf_full' in DATA:
-            df_mf, mf_snap_date = get_mf_snapshot(effective_ed)
+        # ── SHEET 4: MUTUAL FUNDS (optional, DuckDB-backed) ─────────────────────
+        if request.include_mf and 'mf_parquet_path' in DATA:
+            try:
+                snap_date = find_mf_snapshot_date(effective_ed)
+                if snap_date is not None:
+                    where_sql, params = build_mf_where_clause(
+                        request.mf_search, request.mf_subcategories,
+                        request.mf_riskometers, request.mf_benchmarks, snap_date,
+                    )
+                    select_cols = ", ".join(MF_SELECT_COLS)
+                    df_mf = mf_query(
+                        f"""
+                        SELECT {select_cols}
+                        FROM read_parquet(?)
+                        WHERE {where_sql}
+                        ORDER BY return1YearRegular DESC NULLS LAST
+                        LIMIT 500
+                        """,
+                        [DATA['mf_parquet_path']] + params,
+                    )
 
-            if df_mf is not None:
-                df_mf = df_mf.copy()
+                    ws4 = workbook.add_worksheet("Mutual Funds")
+                    ws4.set_column('A:A', 40)
+                    ws4.set_column('B:B', 22)
+                    ws4.set_column('C:F', 12)
 
-                mf_search = getattr(request, "mf_search", "") or ""
-                mf_subcategories = getattr(request, "mf_subcategories", []) or []
-                mf_riskometers = getattr(request, "mf_riskometers", []) or []
-                mf_benchmarks = getattr(request, "mf_benchmarks", []) or []
+                    ws4.merge_range('A1:F1', 'Mutual Fund Performance', title_f)
+                    ws4.merge_range(
+                        'A2:F2',
+                        f"MF data as of {snap_date.strftime('%d %b %Y')} | Index data as of {effective_ed.strftime('%d %b %Y')}",
+                        italic_f
+                    )
+                    ws4.write_row('A3', ["Scheme Name", "AMFI Benchmark", "NAV", "1 Yr", "3 Yr", "5 Yr", "10 Yr"], head_f)
 
-                if mf_search:
-                    df_mf = df_mf[df_mf['schemeName'].str.contains(mf_search, case=False, na=False)]
-                if mf_subcategories:
-                    df_mf = df_mf[df_mf['_subCategory'].isin(mf_subcategories)]
-                if mf_riskometers:
-                    df_mf = df_mf[df_mf['riskometerScheme'].isin(mf_riskometers)]
-                if mf_benchmarks:
-                    df_mf = df_mf[df_mf['benchmark'].isin(mf_benchmarks)]
+                    def get_idx_ret(period):
+                        try:
+                            sd = get_start_date(period, effective_ed)
+                            return calc_cagr(DATA['rebased'], sd, effective_ed, [bench], label=period)[bench]
+                        except Exception:
+                            return None
 
-                df_mf = df_mf.sort_values('return1YearRegular', ascending=False, na_position='last')
+                    ws4.write(3, 0, f" BENCHMARK: {bench}", text_f)
+                    ws4.write(3, 1, "-", text_f)
+                    bench_vals = [None] + [clean_float(get_idx_ret(p)) for p in ["1 Yr", "3 Yr", "5 Yr", "10 Yr"]]
+                    ws4.write_row(3, 2, bench_vals, num_f)
 
-                ws4 = workbook.add_worksheet("Mutual Funds")
-                ws4.set_column('A:A', 40)
-                ws4.set_column('B:B', 22)
-                ws4.set_column('C:F', 12)
-
-                ws4.merge_range('A1:F1', 'Mutual Fund Performance', title_f)
-                ws4.merge_range(
-                    'A2:F2',
-                    f"MF data as of {mf_snap_date.strftime('%d %b %Y')} | Index data as of {effective_ed.strftime('%d %b %Y')}",
-                    italic_f
-                )
-                ws4.write_row('A3', ["Scheme Name", "AMFI Benchmark", "NAV", "1 Yr", "3 Yr", "5 Yr", "10 Yr"], head_f)
-
-                # Comparison row for the selected index benchmark
-                def get_idx_ret(period):
-                    try:
-                        sd = get_start_date(period, effective_ed)
-                        return calc_cagr(DATA['rebased'], sd, effective_ed, [bench], label=period)[bench]
-                    except Exception:
-                        return None
-
-                ws4.write(3, 0, f" BENCHMARK: {bench}", text_f)
-                ws4.write(3, 1, "-", text_f)
-                bench_vals = [None] + [clean_float(get_idx_ret(p)) for p in ["1 Yr", "3 Yr", "5 Yr", "10 Yr"]]
-                ws4.write_row(3, 2, bench_vals, num_f)
-
-                row_idx = 4
-                for _, r in df_mf.head(500).iterrows():
-                    ws4.write(row_idx, 0, r.get('schemeName'), text_f)
-                    ws4.write(row_idx, 1, r.get('benchmark'), text_f)
-                    vals = [
-                        clean_float(r.get('navRegular')),
-                        clean_float(r.get('return1YearRegular')),
-                        clean_float(r.get('return3YearRegular')),
-                        clean_float(r.get('return5YearRegular')),
-                        clean_float(r.get('return10YearRegular')),
-                    ]
-                    ws4.write_row(row_idx, 2, vals, num_f)
-                    row_idx += 1
-            else:
-                logger.warning("⚠️ No MF snapshot available for report date; skipping MF sheet.")
+                    row_idx = 4
+                    for _, r in df_mf.iterrows():
+                        ws4.write(row_idx, 0, r.get('schemeName'), text_f)
+                        ws4.write(row_idx, 1, r.get('benchmark'), text_f)
+                        vals = [
+                            clean_float(r.get('navRegular')),
+                            clean_float(r.get('return1YearRegular')),
+                            clean_float(r.get('return3YearRegular')),
+                            clean_float(r.get('return5YearRegular')),
+                            clean_float(r.get('return10YearRegular')),
+                        ]
+                        ws4.write_row(row_idx, 2, vals, num_f)
+                        row_idx += 1
+                else:
+                    logger.warning("⚠️ No MF snapshot available for report date; skipping MF sheet.")
+            except Exception as mf_sheet_err:
+                logger.error(f"MF sheet generation failed, continuing without it: {mf_sheet_err}")
 
         workbook.close()
         output.seek(0)
@@ -1160,101 +1216,78 @@ async def generate_report(request: MetricsRequest):
             headers={"Content-Disposition": "attachment; filename=NSE_Advanced_Report.xlsx"}
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
         logger.error(f"REPORT ERROR: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINTS — mutual funds (fully DuckDB-backed, no pandas dataframe held in memory)
+# ─────────────────────────────────────────────────────────────────────────────
+
 @app.get("/api/mf-config")
 def get_mf_config():
-    if 'mf_reference' not in DATA:
-        raise HTTPException(503)
-    df = DATA['mf_reference']
-
-    riskometers = sorted(df['riskometerScheme'].dropna().astype(str).unique().tolist())
-    benchmarks = sorted(df['benchmark'].dropna().astype(str).unique().tolist())
-
-    # Distinct (subcategory, riskometer, benchmark) combinations that actually
-    # occur in the data — lets the frontend compute which filter options are
-    # still valid given the other active filters, without a round trip per change.
-    facet_df = df[['_subCategory', 'riskometerScheme', 'benchmark']].dropna().drop_duplicates()
-    facets = [
-        {
-            "subcategory": int(row['_subCategory']),
-            "riskometer": row['riskometerScheme'],
-            "benchmark": row['benchmark'],
-        }
-        for _, row in facet_df.iterrows()
-    ]
-
-    return {
-        "categories": MF_MAP,
-        "riskometers": riskometers,
-        "benchmarks": benchmarks,
-        "facets": facets,
-    }
+    require_data("mf_config")
+    return DATA['mf_config']
 
 
 @app.post("/api/mf-data")
 def get_mf_data(request: MFDataRequest):
-    if 'mf_full' not in DATA:
-        raise HTTPException(503)
+    require_data("mf_parquet_path", "mf_dates")
 
     effective_ed = get_effective_end_date(request.reference_date)
-    df, snap_date = get_mf_snapshot(effective_ed)
+    snap_date = find_mf_snapshot_date(effective_ed)
 
-    if df is None:
+    if snap_date is None:
         return {
             "rows": [], "comparison_row": None,
             "total": 0, "page": 1, "page_size": request.page_size,
             "snapshot_date": None,
         }
 
-    df = df.copy()
+    parquet_path = DATA['mf_parquet_path']
 
-    # --- FILTERS ---
-    if request.search:
-        df = df[df['schemeName'].str.contains(request.search, case=False, na=False)]
+    try:
+        where_sql, params = build_mf_where_clause(
+            request.search, request.subcategories, request.riskometers, request.benchmarks, snap_date,
+        )
 
-    if request.subcategories:
-        df = df[df['_subCategory'].isin(request.subcategories)]
+        total_df = mf_query(
+            f"SELECT COUNT(*) AS n FROM read_parquet(?) WHERE {where_sql}",
+            [parquet_path] + params,
+        )
+        total = int(total_df["n"].iloc[0])
 
-    if request.riskometers:
-        df = df[df['riskometerScheme'].isin(request.riskometers)]
+        sort_col = request.sort_by if request.sort_by in ALLOWED_MF_SORT_COLS else "return1YearRegular"
+        order_dir = "ASC" if request.sort_dir == "asc" else "DESC"
 
-    if request.benchmarks:
-        df = df[df['benchmark'].isin(request.benchmarks)]
+        page = max(request.page, 1)
+        page_size = min(max(request.page_size, 1), 500)
+        offset = (page - 1) * page_size
 
-    # --- SORT ---
-    sort_col = request.sort_by if request.sort_by in df.columns else "return1YearRegular"
-    ascending = request.sort_dir == "asc"
-    if sort_col in df.columns:
-        df = df.sort_values(sort_col, ascending=ascending, na_position="last")
+        select_cols = ", ".join(MF_SELECT_COLS)
+        df_page = mf_query(
+            f"""
+            SELECT {select_cols}
+            FROM read_parquet(?)
+            WHERE {where_sql}
+            ORDER BY {sort_col} {order_dir} NULLS LAST
+            LIMIT ? OFFSET ?
+            """,
+            [parquet_path] + params + [page_size, offset],
+        )
+    except Exception as e:
+        logger.error(f"MF query failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"MF query failed: {e}")
 
-    total = len(df)
-
-    # --- PAGINATE ---
-    page = max(request.page, 1)
-    page_size = min(max(request.page_size, 1), 500)
-    start = (page - 1) * page_size
-    df_page = df.iloc[start:start + page_size]
-
-    # --- CLEAN ---
-    keep_cols = [
-        "schemeName", "benchmark", "riskometerScheme", "navRegular",
-        "return1YearRegular", "return3YearRegular",
-        "return5YearRegular", "return10YearRegular",
-        "_category", "_subCategory",
-    ]
-    df_page = df_page[[c for c in keep_cols if c in df_page.columns]]
     df_page = df_page.replace([np.inf, -np.inf], np.nan)
     df_page = df_page.where(pd.notnull(df_page), None)
     rows = df_page.to_dict("records")
 
-    # --- COMPARISON ROW (our own index, same 1/3/5/10yr windows, as of effective_ed) ---
     comparison_row = None
-    if request.compare_index and request.compare_index in DATA["rebased"].columns:
+    if request.compare_index and request.compare_index in DATA.get("rebased", pd.DataFrame()).columns:
         idx_name = request.compare_index
 
         def get_idx_ret(period):
