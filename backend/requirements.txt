@@ -14,3 +14,4 @@ tqdm==4.68.3
 uvicorn==0.50.2
 xlsxwriter==3.2.9
 yfinance==1.2.0
+orjson
