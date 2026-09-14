@@ -74,9 +74,9 @@ export function Sidebar() {
     console.log("Other Indices:", otherIndices); // Debugging line
 
     const fullMap = { ...config.categories };
-    // if (otherIndices.length > 0) {
-    //   fullMap["Others"] = otherIndices;
-    // }
+    if (otherIndices.length > 0) {
+      fullMap["Others"] = otherIndices;
+    }
 
     const filtered: CategoryMap = {};
     Object.entries(fullMap).forEach(([cat, list]) => {
@@ -202,7 +202,7 @@ export function Sidebar() {
               {organizedCategories && Object.entries(organizedCategories).map(([cat, indices]) => (
                 <AccordionItem key={cat} value={cat} className="border border-slate-100 dark:border-slate-800 rounded-2xl px-3 bg-white dark:bg-slate-950/40 shadow-sm overflow-hidden">
                   <div className="flex items-center justify-between w-full">
-                    <AccordionTrigger className="hover:no-underline py-4 text-[11px] font-black text-slate-600 dark:text-slate-300 uppercase flex-1 text-left tracking-tight">
+                    <AccordionTrigger className="hover:no-underline py-4 text-[11px] font-black text-slate-600 dark:text-slate-300  flex-1 text-left tracking-tight uppercase">
                       {cat}
                     </AccordionTrigger>
                     
@@ -240,7 +240,7 @@ export function Sidebar() {
                         <label 
                           htmlFor={`check-${idx}`} 
                           // Removed 'truncate', added 'leading-tight' and 'flex-1'
-                          className="text-[11px] font-bold cursor-pointer text-slate-600 dark:text-slate-300 group-hover:text-blue-600 transition-colors uppercase tracking-tight flex-1 wrap-break-word leading-tight"
+                          className="text-[11px] font-bold cursor-pointer text-slate-600 dark:text-slate-300 group-hover:text-blue-600 transition-colors tracking-tight flex-1 wrap-break-word leading-tight"
                         >
                           {idx}
                         </label>

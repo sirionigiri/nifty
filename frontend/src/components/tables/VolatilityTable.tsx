@@ -53,13 +53,6 @@ export const columns: ColumnDef<VolatilityData>[] = [
   },
 ]
 
-const dummyData: VolatilityData[] = [
-  { period: "Last Week", nifty50: 13.00, niftyNext50: 13.02, niftyMidcap150: 11.21 },
-  { period: "Last Month", nifty50: 15.20, niftyNext50: 18.29, niftyMidcap150: 17.25 },
-  { period: "YTD", nifty50: 13.03, niftyNext50: 17.66, niftyMidcap150: 16.89 },
-  { period: "1 Yr", nifty50: 11.92, niftyNext50: 15.72, niftyMidcap150: 15.50 },
-  { period: "20 Yr", nifty50: 20.89, niftyNext50: 22.95, niftyMidcap150: 20.95 },
-]
 
 export function VolatilityTable() {
   return (
@@ -70,9 +63,6 @@ export function VolatilityTable() {
         </h3>
       </div>
       {/* We add a custom wrapper to override the default padding of DataTable cells for edge-to-edge color */}
-      <div className="[&_td]:p-0 [&_td]:overflow-hidden">
-        <DataTable columns={columns} data={dummyData} />
-      </div>
     </div>
   )
 }

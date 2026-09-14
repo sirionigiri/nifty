@@ -61,9 +61,9 @@ logger = logging.getLogger(__name__)
 # SOURCE URLS (raw GitHub — mirrored through jsDelivr at fetch time, see below)
 # ─────────────────────────────────────────────────────────────────────────────
 
-URL_RETURNS = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/nifty_data.parquet"
-URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/data/international_data.parquet"
-URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-screener-data/main/valuation_data.parquet"
+URL_RETURNS = "https://raw.githubusercontent.com/sirionigiri/nse-data-v2/main/nifty_all_indices_tri.parquet"
+URL_INTL = "https://raw.githubusercontent.com/sirionigiri/nse-data-v2/main/data/international_data.parquet"
+URL_VALUATION = "https://raw.githubusercontent.com/sirionigiri/nse-data-v2/main/nifty_all_indices_valuation.parquet"
 URL_MF = "https://raw.githubusercontent.com/sirionigiri/mf-data/main/amfi_fund_performance_daily.parquet"
 
 FETCH_TIMEOUT = 60

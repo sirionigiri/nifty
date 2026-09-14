@@ -16,6 +16,47 @@ import { LoadingSpinner } from "@/components/ui/LoadingSpinner"
 import { API_BASE_URL } from "@/lib/utils"
 import { toast } from "sonner" 
 
+// ── Volatility gradient helpers ──────────────────────────────────────────
+// Green (low vol) -> Goldenrod (mid vol) -> Red (high vol), interpolated
+// continuously rather than snapped to discrete thresholds, since vol is a
+// genuinely continuous metric and a hard cutoff would make two adjacent
+// values (e.g. 14.9 vs 15.1) jump colors abruptly at an arbitrary line.
+
+function hexToRgb(hex: string) {
+  const bigint = parseInt(hex.replace("#", ""), 16)
+  return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 }
+}
+
+function interpolateColor(color1: string, color2: string, factor: number) {
+  const c1 = hexToRgb(color1)
+  const c2 = hexToRgb(color2)
+  const r = Math.round(c1.r + (c2.r - c1.r) * factor)
+  const g = Math.round(c1.g + (c2.g - c1.g) * factor)
+  const b = Math.round(c1.b + (c2.b - c1.b) * factor)
+  return `rgb(${r}, ${g}, ${b})`
+}
+
+/**
+ * Maps a volatility value to a color on a green -> goldenrod -> red
+ * gradient, normalized against [min, max] observed in the current table.
+ * t=0 (at min, closest to 0 vol) -> green
+ * t=0.5 (midpoint of the observed range) -> goldenrod
+ * t=1 (at max, highest vol) -> red
+ */
+function getVolatilityColor(value: number, min: number, max: number): string {
+  const GREEN = "#16a34a"
+  const GOLDENROD = "#DAA520"
+  const RED = "#dc2626"
+
+  if (max === min) return GREEN
+
+  const t = Math.max(0, Math.min(1, (value - min) / (max - min)))
+  if (t <= 0.5) {
+    return interpolateColor(GREEN, GOLDENROD, t / 0.5)
+  }
+  return interpolateColor(GOLDENROD, RED, (t - 0.5) / 0.5)
+}
+
 export function MetricSection({ title, metric, chartLabel, colorMode = "categorical", forcedIndices = null }: any) {
   const { selectedIndices: sidebarIndices, benchmark, periods, referenceDate } = useStore();
   const [zoomEnabled, setZoomEnabled] = useState(false);
@@ -114,6 +155,26 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
       .filter(d => d.value !== null && d.value !== undefined);
   }, [rows, activePeriod]);
 
+  // Min/max volatility across the WHOLE table (every period, every index),
+  // not just the active period's chart data — so the gradient stays stable
+  // as you switch between period tabs instead of rescaling every click.
+  const volRange = useMemo(() => {
+    if (metric !== 'vol' || rows.length === 0) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    rows.forEach((row: any) => {
+      Object.entries(row).forEach(([key, val]) => {
+        if (key === 'Period' || key === 'Range') return;
+        if (typeof val === 'number' && Number.isFinite(val)) {
+          if (val < min) min = val;
+          if (val > max) max = val;
+        }
+      });
+    });
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+    return { min, max };
+  }, [rows, metric]);
+
   if (isLoading && !data) {
     return (
       <div className="w-full py-20 border-b border-slate-100 dark:border-slate-800 flex flex-col items-center justify-center gap-6 text-center">
@@ -153,6 +214,18 @@ export function MetricSection({ title, metric, chartLabel, colorMode = "categori
         }
         const num = val as number | null;
         if (num === null || typeof num !== 'number') return <div className="p-3 text-center text-slate-400">—</div>;
+
+        // Volatility: continuous green -> goldenrod -> red gradient,
+        // normalized against this table's observed min/max.
+        if (metric === 'vol' && volRange) {
+          const gradientColor = getVolatilityColor(num, volRange.min, volRange.max);
+          return (
+            <div className="p-3 text-center font-mono font-semibold" style={{ color: gradientColor }}>
+              {num.toFixed(2)}
+            </div>
+          );
+        }
+
         let color = "text-slate-600 dark:text-slate-300";
         if (metric === 'beta') color = num > 1.1 ? "text-red-600" : num < 0.9 ? "text-blue-600" : "text-slate-600";
         else if (metric === 'mdd' || num < 0) color = "text-red-600 font-bold";
