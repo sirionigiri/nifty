@@ -7,6 +7,7 @@ Endpoints: /api/config, /api/summary, /api/metrics, /api/valuation-data,
 """
 
 # ── Standard Library ──────────────────────────────────────────────────────────
+from http import client
 import io
 import logging
 import os
@@ -33,6 +34,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless backend — avoids GUI/font-cache overhead on cold start
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
+from xlsxwriter.utility import xl_rowcol_to_cell
 
 # ── Internal ──────────────────────────────────────────────────────────────────
 from analytics import (
@@ -237,6 +239,29 @@ MF_MAP = {
     5: {"name": "Other", "subs": {38: "Index/Passive", 39: "Gold/Silver ETF FOF"}}
 }
 
+URL_MF_NAV = "https://raw.githubusercontent.com/sirionigiri/nse-data-v2/main/data/mf_monthly_growth_nav.parquet"
+
+MF_CLASS_DEFAULTS = {
+    "Large-Cap": {"benchmark": "NIFTY 100", "extras": ["NIFTY 50", "NIFTY100 QUALITY 30", "NIFTY200 MOMENTUM 30"]},
+    "Mid-Cap": {"benchmark": "NIFTY MIDCAP 150", "extras": ["NIFTY MIDCAP150 QUALITY 50", "NIFTY MIDCAP150 MOMENTUM 50"]},
+    "Small-Cap": {"benchmark": "NIFTY SMALLCAP 250", "extras": ["NIFTY SMALLCAP250 QUALITY 50", "NIFTY SMALLCAP250 MOMENTUM QUALITY 100"]},
+    "Flexi-Cap & Multi-Cap": {"benchmark": "NIFTY 500", "extras": ["NIFTY500 MULTICAP 50:25:25", "NIFTY500 FLEXICAP QUALITY 30"]},
+    "Thematic": {"benchmark": "NIFTY 500", "extras": []},
+    "ELSS": {"benchmark": "NIFTY 500", "extras": []},
+    "International": {"benchmark": "S&P 500", "extras": ["Nasdaq 100 Futures"]},
+}
+
+
+class MFAnalysisRequest(BaseModel):
+    fund_class: str
+    benchmark_index: Optional[str] = None
+    extra_indices: Optional[List[str]] = None       # None -> class defaults
+    reference_date: Optional[str] = None
+    n_years: int = 12
+    min_history_months: int = 12
+    include_partial_in_rank: bool = False
+    rank_with_indices: bool = True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REQUEST MODELS
@@ -341,6 +366,27 @@ def _mark_status(key: str, ok: bool, error: Exception = None):
         "loaded_at": pd.Timestamp.utcnow().isoformat(),
         "error": f"{type(error).__name__}: {error}" if error else None,
     }
+    
+
+async def load_mf_nav_data(client: httpx.AsyncClient):
+    content = await fetch_parquet_bytes(client, build_source_urls(URL_MF_NAV))
+    df = pd.read_parquet(io.BytesIO(content))
+    df["month"] = pd.to_datetime(df["month"])
+    df = df.drop_duplicates(["scheme_code", "month"], keep="last")
+
+    wide = df.pivot(index="month", columns="scheme_code", values="nav").sort_index()
+    full_idx = pd.period_range(wide.index.min(), wide.index.max(), freq="M").to_timestamp(how="end").normalize()
+    raw = wide.reindex(full_idx)                    # real observations only
+    DATA["mf_nav_raw"] = raw
+    DATA["mf_nav_wide"] = raw.ffill(limit=1)        # bridge 1-month holes for the maths
+    wide = DATA["mf_nav_wide"]                      # keep the log line below working
+    
+    DATA["mf_nav_meta"] = (
+        df.sort_values("month").drop_duplicates("scheme_code", keep="last")
+        .set_index("scheme_code")[["scheme_name", "amc", "fund_class"]]
+    )
+    _mark_status("mf_nav", True)
+    logger.info(f"✅ MF NAV ready: {wide.shape[1]} schemes x {wide.shape[0]} months.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -573,8 +619,8 @@ async def startup_event():
             # failure in one (return_exceptions=True) can't block or crash
             # the others, and total startup time is roughly the slowest
             # single loader instead of the sum of all three.
-            labels = ["market", "valuation", "mf"]
-            tasks = [load_market_data(client), load_valuation_data(client), load_mf_data(client)]
+            labels = ["market", "valuation", "mf", "mf_nav"]
+            tasks = [load_market_data(client), load_valuation_data(client), load_mf_data(client), load_mf_nav_data(client)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for label, result in zip(labels, results):
@@ -1318,6 +1364,540 @@ def get_mf_data(request: MFDataRequest):
         "page_size": page_size,
         "snapshot_date": snap_date.strftime("%Y-%m-%d"),
     }
+    
+# ─────────────────────────────────────────────────────────────────────────────
+# MF CATEGORY ANALYSIS (month-end NAV based)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pct(v):
+    return None if v is None or not np.isfinite(v) else round(float(v) * 100, 2)
+
+
+def _num(v, nd=2):
+    return None if v is None or not np.isfinite(v) else round(float(v), nd)
+
+
+def _resolve_index(name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    return next((c for c in DATA["rebased"].columns if c.strip().upper() == name.strip().upper()), None)
+
+
+def _month_end_prices(cols, month_ends) -> pd.DataFrame:
+    """Index levels at the same month-ends as the fund NAVs (last trading day <= month-end)."""
+    reb = DATA["rebased"]
+    cols = [c for c in cols if c in reb.columns]
+    px = reb[cols].sort_index().reindex(month_ends, method="ffill")
+    px.loc[px.index > reb.index.max()] = np.nan           # never fabricate months beyond index data
+    return px
+
+
+def compute_mf_analysis(fund_class, as_of, bench, extras, n_years=12, min_history_months=12,
+                        rank_partial=False, rank_with_indices=True):
+    wide, meta = DATA["mf_nav_wide"], DATA["mf_nav_meta"]
+    eligible = wide.index[wide.index <= as_of]
+    if len(eligible) == 0:
+        return None
+    t = eligible[-1]                                       # as-of month-end
+
+    # ── funds of this class that are live at t and have enough history ──────
+    codes = meta.index[meta["fund_class"] == fund_class]
+    nav = wide.reindex(columns=codes).loc[:t]
+    nav = nav.loc[:, nav.loc[t].notna()]
+    if nav.shape[1] == 0:
+        return None
+    first_m = nav.notna().idxmax()
+    hist = (t.year - first_m.dt.year) * 12 + (t.month - first_m.dt.month)
+    nav = nav.loc[:, hist >= min_history_months]
+    if nav.shape[1] == 0:
+        return None
+    nav.columns = nav.columns.astype(str)
+
+    # ── append benchmark / peer indices as rows on the same month-end grid ──
+    idx_names = [bench] + [e for e in extras if e != bench]
+    px = _month_end_prices(idx_names, nav.index)
+    px.columns = [f"IDX::{c}" for c in px.columns]
+    allp = pd.concat([nav, px], axis=1)
+    fund_cols = list(nav.columns)
+    bkey = f"IDX::{bench}"
+
+    has = allp.notna().any()
+    first = allp.notna().idxmax()
+    ye = allp[allp.index.month == 12].copy()
+    ye.index = ye.index.year
+
+    last_full = t.year if t.month == 12 else t.year - 1
+    years = [last_full - i for i in range(n_years)]        # most recent first
+
+    # ── calendar-year returns (+ part-year return in each fund's first year) ─
+    cur = ye.reindex(years)
+    prev = ye.reindex([y - 1 for y in years]); prev.index = years
+    cal = (cur / prev - 1).replace([np.inf, -np.inf], np.nan)
+
+    partial = pd.DataFrame(False, index=years, columns=allp.columns)
+    for col in allp.columns[has.values]:
+        f = first[col]; y0 = f.year
+        if (y0 in cal.index and f.month < 12 and pd.isna(cal.at[y0, col])
+                and y0 in ye.index and pd.notna(ye.at[y0, col])):
+            cal.at[y0, col] = ye.at[y0, col] / allp.at[f, col] - 1
+            partial.at[y0, col] = True
+
+    # ── trailing CAGR as of t (true trailing, not calendar-compounded) ──────
+    pos = len(allp) - 1
+    def trailing(n):
+        if pos - 12 * n < 0:
+            return pd.Series(np.nan, index=allp.columns)
+        return ((allp.iloc[pos] / allp.iloc[pos - 12 * n]) ** (1 / n) - 1).replace([np.inf, -np.inf], np.nan)
+    trail = {n: trailing(n) for n in (10, 5, 3, 1)}
+
+    # ── rolling 3Y CAGR for the window ending each calendar year ────────────
+    num = ye.reindex(years).to_numpy(dtype=float)
+    den = ye.reindex([y - 3 for y in years]).to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        roll3 = pd.DataFrame(np.power(num / den, 1 / 3) - 1, index=years, columns=allp.columns)
+    roll3 = roll3.replace([np.inf, -np.inf], np.nan)
+    roll3_avg = roll3.mean()
+
+    # ── ranks (1 = best), average / median over 10-5-3 most recent years ────
+    calr = cal if rank_partial else cal.where(~partial)
+    rk_src = calr if rank_with_indices else calr[fund_cols]
+    ranks = rk_src.rank(axis=1, ascending=False, method="min").reindex(columns=allp.columns)
+    universe = rk_src.notna().sum(axis=1)
+
+    def rank_stat(k, fn="mean"):
+        sub = ranks.iloc[:k]
+        return getattr(sub, fn)().where(sub.notna().sum() == k)       # need the full window
+    avg10, med10, avg5, avg3 = rank_stat(10), rank_stat(10, "median"), rank_stat(5), rank_stat(3)
+
+    # ── correlation of calendar-year returns vs benchmark ───────────────────
+    if bkey in calr.columns:
+        bs = calr[bkey]
+        corr = calr.apply(lambda c: c.corr(bs, min_periods=5))
+    else:
+        corr = pd.Series(np.nan, index=allp.columns)
+
+    # ── YTD for the current (incomplete) year ───────────────────────────────
+    ytd_year = t.year if t.month != 12 else None
+    ytd = None
+    if ytd_year:
+        base = ye.reindex([ytd_year - 1]).iloc[0]
+        ytd = (allp.iloc[pos] / base - 1).replace([np.inf, -np.inf], np.nan)
+
+    def build_row(col):
+        is_idx = col.startswith("IDX::")
+        if is_idx:
+            nm, amc = col[5:], None
+        else:
+            m = meta.loc[int(col)]
+            nm, amc = m["scheme_name"], m["amc"]
+        return {
+            "id": col, "name": nm, "amc": amc,
+            "is_index": is_idx, "is_benchmark": col == bkey,
+            "ret": {str(y): _pct(cal.at[y, col]) for y in years},
+            "partial": [int(y) for y in years if partial.at[y, col]],
+            "ytd": _pct(ytd[col]) if ytd is not None else None,
+            "trail": {str(n): _pct(trail[n][col]) for n in trail},
+            "roll3": {str(y): _pct(roll3.at[y, col]) for y in years},
+            "roll3_avg": _pct(roll3_avg[col]),
+            "corr": _num(corr[col]),
+            "rank": {str(y): (int(ranks.at[y, col]) if pd.notna(ranks.at[y, col]) else None) for y in years},
+            "avg_rank_10": _num(avg10[col], 1), "med_rank_10": _num(med10[col], 1),
+            "avg_rank_5": _num(avg5[col], 1), "avg_rank_3": _num(avg3[col], 1),
+        }
+
+    idx_cols = [f"IDX::{c}" for c in idx_names if f"IDX::{c}" in allp.columns]
+    fund_sorted = sorted(
+        fund_cols,
+        key=lambda c: (pd.isna(trail[5][c]), -(trail[5][c] if pd.notna(trail[5][c]) else 0.0)),
+    )
+    return {
+        "as_of": t.strftime("%Y-%m-%d"),
+        "years": years, "ytd_year": ytd_year, "benchmark": bench,
+        "n_funds": len(fund_cols),
+        "universe": {str(y): int(universe[y]) for y in years},
+        "rows": [build_row(c) for c in idx_cols + fund_sorted],
+    }
+
+
+@app.get("/api/mf-analysis-config")
+def mf_analysis_config():
+    require_data("mf_nav_wide", "mf_nav_meta", "rebased")
+    counts = DATA["mf_nav_meta"]["fund_class"].value_counts().to_dict()
+    classes = []
+    for cls, d in MF_CLASS_DEFAULTS.items():
+        classes.append({
+            "id": cls,
+            "count": int(counts.get(cls, 0)),
+            "benchmark": _resolve_index(d["benchmark"]),
+            "extras": [x for x in (_resolve_index(e) for e in d["extras"]) if x],
+        })
+    wide = DATA["mf_nav_wide"]
+    return {
+        "classes": classes,
+        "indices": DATA["indices"],
+        "min_date": wide.index.min().strftime("%Y-%m-%d"),
+        "max_date": wide.index.max().strftime("%Y-%m-%d"),
+    }
+
+
+@app.post("/api/mf-analysis")
+def mf_analysis(req: MFAnalysisRequest):
+    require_data("mf_nav_wide", "mf_nav_meta", "rebased")
+    d = MF_CLASS_DEFAULTS.get(req.fund_class)
+    if d is None:
+        raise HTTPException(status_code=400, detail=f"Unknown fund_class '{req.fund_class}'")
+
+    bench = _resolve_index(req.benchmark_index or d["benchmark"]) or _resolve_index("NIFTY 500")
+    if bench is None:
+        raise HTTPException(status_code=400, detail="Benchmark index not found in index data")
+    raw_extras = d["extras"] if req.extra_indices is None else req.extra_indices
+    extras = [x for x in (_resolve_index(e) for e in raw_extras) if x]
+
+    try:
+        out = compute_mf_analysis(
+            req.fund_class, get_effective_end_date(req.reference_date), bench, extras,
+            n_years=max(req.n_years, 10), min_history_months=max(req.min_history_months, 0),
+            rank_partial=req.include_partial_in_rank, rank_with_indices=req.rank_with_indices,
+        )
+    except Exception as e:
+        logger.error(f"MF analysis failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if out is None:
+        return {"as_of": None, "years": [], "ytd_year": None, "benchmark": bench,
+                "n_funds": 0, "universe": {}, "rows": []}
+    return out
+
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MF IMPLEMENTATION 2 — funds + indices on ONE month-end grid
+# ═════════════════════════════════════════════════════════════════════════════
+
+MF2_CLASS_ORDER = ["Large-Cap", "Mid-Cap", "Small-Cap", "Flexi-Cap & Multi-Cap", "Thematic", "ELSS", "International"]
+MF2_ALL_PERIODS = [1, 3, 5, 10, 15, 20]
+
+
+class MF2Request(BaseModel):
+    fund_codes: List[int] = []
+    indices: List[str] = []
+    benchmark: str = "NIFTY 50"
+    periods: List[int] = [1, 3, 5, 10, 15, 20]
+    reference_date: Optional[str] = None
+    min_months: int = 12            # NEW
+
+
+class MF2ReportRequest(MF2Request):
+    sheets: List[str] = ["returns", "calendar", "rolling", "vs_benchmark", "rankings"]
+    roll_start_year: Optional[int] = None
+
+
+def _m2_resolve(name):
+    if not name:
+        return None
+    up = name.strip().upper()
+    return next((c for c in DATA["rebased"].columns if str(c).strip().upper() == up), None)
+
+
+def _m2_lst(x, nd=2):
+    a = np.asarray(x, dtype=float)
+    return [None if not np.isfinite(v) else round(float(v), nd) for v in a]
+
+
+def _m2_int(x):
+    a = np.asarray(x, dtype=float)
+    return [None if not np.isfinite(v) else int(v) for v in a]
+
+MF2_MAX_STALE_MONTHS = 1      # last real NAV may be at most this many months before the as-of month (0 = strict)
+MF2_MIN_COVERAGE = 0.9        # share of months (first NAV -> as-of) that must have a real NAV
+
+
+def mf2_asof(req_date):
+    """Latest COMPLETE month-end <= reference date (that exists in the NAV grid)."""
+    idx = DATA["mf_nav_wide"].index
+    ed = get_effective_end_date(req_date)
+    ok = idx[idx <= ed]
+    return ok[-1] if len(ok) else None
+
+
+def mf2_eligible(t, min_months=12) -> pd.Index:
+    raw = DATA["mf_nav_raw"]
+    upto = raw.loc[:t]
+    if upto.empty:
+        return raw.columns[:0]
+    pres = upto.notna().to_numpy()
+    last_i = len(upto) - 1
+    n_obs = pres.sum(axis=0)
+    first_i = pres.argmax(axis=0)                           # first real NAV (position)
+    last_obs_i = last_i - pres[::-1].argmax(axis=0)         # last real NAV (position)
+    span = last_i - first_i + 1
+    ok = (
+        (n_obs > 0)
+        & (first_i <= last_i - max(min_months, 0))
+        & (last_obs_i >= last_i - MF2_MAX_STALE_MONTHS)
+        & (n_obs >= MF2_MIN_COVERAGE * span)
+    )
+    return raw.columns[ok]
+
+def compute_mf2(req: MF2Request):
+    wide, meta, reb = DATA["mf_nav_wide"], DATA["mf_nav_meta"], DATA["rebased"]
+
+    t = mf2_asof(req.reference_date)
+    if t is None:
+        return None
+    bench = _m2_resolve(req.benchmark) or _m2_resolve("NIFTY 50")
+    if bench is None:
+        raise HTTPException(status_code=400, detail="Benchmark index not found in index data")
+
+    others = {_m2_resolve(n) for n in req.indices} - {None, bench}
+    idx_names = [bench] + sorted(others)
+
+    ok = set(mf2_eligible(t, req.min_months))               # authoritative filter, even if the UI sends stale codes
+    codes = [c for c in dict.fromkeys(req.fund_codes) if c in ok]
+    codes.sort(key=lambda c: str(meta.at[c, "scheme_name"]))
+
+    periods = sorted({p for p in req.periods if p in MF2_ALL_PERIODS})
+    
+    
+    # ── one monthly grid: oldest first-valid among selected items, at least 21y back ──
+    firsts = [reb[c].first_valid_index() for c in idx_names] + [wide[c].first_valid_index() for c in codes]
+    start = min([d for d in firsts if d is not None] + [t - pd.DateOffset(years=21)])
+    grid = pd.period_range(start.to_period("M"), t.to_period("M"), freq="M").to_timestamp(how="end").normalize()
+
+    fund_px = wide.reindex(columns=codes).reindex(grid)
+    fund_px.columns = [f"F:{c}" for c in codes]
+    idx_px = reb[idx_names].sort_index().reindex(grid, method="ffill")     # last trading day <= month-end
+    idx_px.loc[idx_px.index > reb.index.max()] = np.nan
+    idx_px.columns = [f"I:{c}" for c in idx_names]
+    P = pd.concat([idx_px, fund_px], axis=1)
+
+    keys, bkey = list(P.columns), f"I:{bench}"
+    N, pos = len(keys), len(P) - 1
+
+    items = []
+    for k in keys:
+        if k.startswith("I:"):
+            items.append({"id": k, "name": k[2:], "kind": "index", "amc": None, "cls": None, "is_benchmark": k == bkey})
+        else:
+            m = meta.loc[int(k[2:])]
+            items.append({"id": k, "name": str(m["scheme_name"]), "kind": "fund",
+                          "amc": m["amc"] if pd.notna(m["amc"]) else None,
+                          "cls": m["fund_class"], "is_benchmark": False})
+
+    # ── trailing CAGR / excess / correlation / tracking error (monthly returns) ──
+    R = P.pct_change(fill_method=None)
+    cagr, excess, corr, te = {}, {}, {}, {}
+    for n in periods:
+        back, key = pos - 12 * n, str(n)
+        if back < 0:
+            cagr[key] = excess[key] = corr[key] = te[key] = [None] * N
+            continue
+        c = ((P.iloc[pos] / P.iloc[back]) ** (1.0 / n) - 1).replace([np.inf, -np.inf], np.nan) * 100
+        W = R.iloc[back + 1: pos + 1]
+        bw = W[bkey]
+        valid = (W.notna().to_numpy() & bw.notna().to_numpy()[:, None]).sum(axis=0)
+        ok = P.iloc[back].notna().to_numpy() & (valid >= 0.9 * 12 * n)     # item must span the whole window
+        cr = W.corrwith(bw).to_numpy(dtype=float)
+        tr = (W.sub(bw, axis=0).std(ddof=1) * np.sqrt(12) * 100).to_numpy(dtype=float)
+        cagr[key] = _m2_lst(c)
+        excess[key] = _m2_lst(c - c[bkey])
+        corr[key] = _m2_lst(np.where(ok, cr, np.nan))
+        te[key] = _m2_lst(np.where(ok, tr, np.nan))
+
+    # ── calendar-year returns (full Dec→Dec years only) ──
+    dec = P[P.index.month == 12].copy()
+    dec.index = dec.index.year
+    L = t.year if t.month == 12 else t.year - 1
+    y0 = P.index.min().year
+    cal_years = list(range(y0 + 1, L + 1))
+    CAL = pd.DataFrame(index=cal_years, columns=keys, dtype=float)
+    if cal_years:
+        cur = dec.reindex(cal_years)
+        prev = dec.reindex([y - 1 for y in cal_years]); prev.index = cal_years
+        CAL = ((cur / prev) - 1).replace([np.inf, -np.inf], np.nan) * 100
+    n_valid = CAL.notna().sum(axis=1)
+    years = [y for y in cal_years if n_valid[y] > 0]
+
+    ytd_year, ytd = (t.year if t.month != 12 else None), None
+    if ytd_year:
+        base = dec.reindex([ytd_year - 1]).iloc[0]
+        ytd = (P.iloc[pos] / base - 1).replace([np.inf, -np.inf], np.nan) * 100
+
+    # ── rolling 3Y (window ending each Dec) ──
+    roll_all = list(range(y0 + 3, L + 1))
+    ROLL = pd.DataFrame(index=roll_all, columns=keys, dtype=float)
+    if roll_all:
+        num = dec.reindex(roll_all)
+        den = dec.reindex([y - 3 for y in roll_all]); den.index = roll_all
+        ROLL = (((num / den) ** (1.0 / 3)) - 1).replace([np.inf, -np.inf], np.nan) * 100
+    roll_years = [y for y in roll_all if ROLL.loc[y].notna().any()]
+
+    # ── ranks (1 = best) among everything selected, + median / avg(10,5,3) ──
+    rank, universe, median_rank, avg_rank = {}, {}, [None] * N, {"10": [None] * N, "5": [None] * N, "3": [None] * N}
+    if years:
+        CALy = CAL.loc[years]
+        RK = CALy.rank(axis=1, ascending=False, method="min")
+        universe = {str(y): int(CALy.loc[y].notna().sum()) for y in years}
+        rank = {str(y): _m2_int(RK.loc[y]) for y in years}
+        median_rank = _m2_lst(RK.median().where(RK.notna().sum() >= 3), 1)
+        for k in (10, 5, 3):
+            sub = RK.reindex(list(range(L, L - k, -1)))
+            full = sub.notna().sum() == k                      # need the complete window
+            avg_rank[str(k)] = _m2_int(np.floor(sub.mean().where(full) + 0.5))
+
+    yd = sorted(years, reverse=True)
+    return {
+        "as_of": t.strftime("%Y-%m-%d"), "benchmark": bench, "periods": periods, "items": items,
+        "cagr": cagr, "excess": excess, "corr": corr, "te": te,
+        "years": yd, "n_valid": {str(y): int(n_valid[y]) for y in yd},
+        "cal": {str(y): _m2_lst(CAL.loc[y]) for y in yd},
+        "ytd_year": ytd_year, "ytd": _m2_lst(ytd) if ytd is not None else None,
+        "roll_years": sorted(roll_years, reverse=True),
+        "roll3": {str(y): _m2_lst(ROLL.loc[y]) for y in roll_years},
+        "rank": {str(y): rank[str(y)] for y in yd} if years else {},
+        "universe": universe, "median_rank": median_rank, "avg_rank": avg_rank,
+    }
+
+
+@app.get("/api/mf2/config")
+def mf2_config(reference_date: Optional[str] = None, min_months: int = 12):
+    require_data("mf_nav_wide", "mf_nav_meta", "rebased")
+    meta, wide = DATA["mf_nav_meta"], DATA["mf_nav_wide"]
+
+    t = mf2_asof(reference_date)
+    ok = set(mf2_eligible(t, min_months)) if t is not None else set()
+
+    m = meta.reset_index().sort_values("scheme_name")
+    m = m[m["fund_class"].isin(MF2_CLASS_ORDER)]
+    elig = m[m["scheme_code"].isin(ok)]
+    counts = elig["fund_class"].value_counts().to_dict()
+
+    return {
+        "classes": [{"id": c, "count": int(counts.get(c, 0))} for c in MF2_CLASS_ORDER],
+        "funds": [
+            {"c": int(r.scheme_code), "n": str(r.scheme_name), "a": r.amc if pd.notna(r.amc) else None, "k": r.fund_class}
+            for r in elig.itertuples(index=False)
+        ],
+        "hidden": int(len(m) - len(elig)),
+        "as_of": t.strftime("%Y-%m-%d") if t is not None else None,
+        "indices": DATA["indices"],
+        "min_date": wide.index.min().strftime("%Y-%m-%d"),
+        "max_date": wide.index.max().strftime("%Y-%m-%d"),
+    }
+    
+
+@app.post("/api/mf2/analysis")
+def mf2_analysis(req: MF2Request):
+    require_data("mf_nav_wide", "mf_nav_meta", "rebased")
+    try:
+        with np.errstate(all="ignore"):
+            res = compute_mf2(req)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"MF2 analysis failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+    if res is None:
+        raise HTTPException(status_code=404, detail="No mutual fund data on or before the reference date")
+    return res
+
+
+@app.post("/api/mf2/report")
+def mf2_report(req: MF2ReportRequest):
+    require_data("mf_nav_wide", "mf_nav_meta", "rebased")
+    with np.errstate(all="ignore"):
+        res = compute_mf2(req)
+    if res is None:
+        raise HTTPException(status_code=404, detail="No mutual fund data on or before that date")
+
+    items, periods, years, N = res["items"], res["periods"], res["years"], len(res["items"])
+    show_years = [y for y in years if res["n_valid"][str(y)] >= max(1, 0.5 * N)]   # same default as the UI
+    out = io.BytesIO()
+    wb = xlsxwriter.Workbook(out, {"in_memory": True, "nan_inf_to_errors": True})
+
+    base = {"font_size": 9, "border": 1, "valign": "vcenter"}
+    f_title = wb.add_format({"bold": True, "font_color": "white", "bg_color": "black", "align": "center", "valign": "vcenter", "border": 1, "font_size": 12})
+    f_note = wb.add_format({"italic": True, "font_size": 8})
+    f_head = wb.add_format({**base, "bold": True, "bg_color": "#F2F2F2", "align": "center", "text_wrap": True})
+    f_text = wb.add_format({**base, "align": "left"})
+    f_pct = wb.add_format({**base, "align": "center", "num_format": '0.0"%"'})
+    f_dec = wb.add_format({**base, "align": "center", "num_format": "0.00"})
+    f_flt = wb.add_format({**base, "align": "center", "num_format": "0.0"})
+    f_int = wb.add_format({**base, "align": "center", "num_format": "0"})
+    foot = f"Month-end NAV basis · Regular plan, Growth option · as of {res['as_of']} · Benchmark: {res['benchmark']}"
+    HEAT = {"type": "3_color_scale", "min_color": "#F8696B", "mid_type": "num", "mid_value": 0, "mid_color": "#FFFFFF", "max_color": "#63BE7B"}
+    RANKHEAT = {"type": "3_color_scale", "min_color": "#63BE7B", "mid_color": "#FFEB84", "max_color": "#F8696B"}
+
+    def lead(it):
+        return [("[Benchmark] " if it["is_benchmark"] else "") + it["name"], "Index" if it["kind"] == "index" else "Fund", it["cls"] or ""]
+
+    def make(name, headers, rows, fmts):
+        ws = wb.add_worksheet(name)
+        last = len(headers) - 1
+        ws.merge_range(0, 0, 0, last, name, f_title)
+        ws.merge_range(1, 0, 1, last, foot, f_note)
+        ws.write_row(2, 0, headers, f_head)
+        ws.set_row(2, 30)
+        for i, row in enumerate(rows):
+            for j, v in enumerate(row):
+                ws.write(3 + i, j, v, fmts[j])
+        ws.set_column(0, 0, 48); ws.set_column(1, 1, 8); ws.set_column(2, 2, 22); ws.set_column(3, last, 11)
+        ws.freeze_panes(3, 1)
+        return ws
+
+    L3 = [f_text, f_text, f_text]
+    P_ = len(periods)
+
+    if "returns" in req.sheets:
+        rows = [lead(it) + [res["cagr"][str(n)][i] for n in periods] for i, it in enumerate(items)]
+        ws = make("Returns (CAGR)", ["Fund / Index", "Type", "Category"] + [f"{n} Yr" for n in periods], rows, L3 + [f_pct] * P_)
+        if rows: ws.conditional_format(3, 3, 2 + len(rows), 2 + P_, HEAT)
+
+    if "calendar" in req.sheets:
+        ytd = res["ytd_year"]
+        headers = ["Fund / Index", "Type", "Category"] + [str(y) for y in show_years] + ([f"{ytd} YTD"] if ytd else [])
+        rows = [lead(it) + [res["cal"][str(y)][i] for y in show_years] + ([res["ytd"][i]] if ytd else []) for i, it in enumerate(items)]
+        ws = make("Calendar Returns", headers, rows, L3 + [f_pct] * (len(headers) - 3))
+        if rows and len(headers) > 3: ws.conditional_format(3, 3, 2 + len(rows), len(headers) - 1, HEAT)
+
+    if "rolling" in req.sheets:
+        S = req.roll_start_year
+        ends = [y for y in res["roll_years"] if S is None or y >= S + 2]
+        headers = ["Fund / Index", "Type", "Category", "Average"] + [str(y) for y in ends]
+        vals = [[res["roll3"][str(y)][i] for y in ends] for i in range(N)]
+        rows = [lead(it) + [None] + vals[i] for i, it in enumerate(items)]
+        ws = make("3Y Rolling", headers, rows, L3 + [f_pct] * (len(headers) - 3))
+        for i, v in enumerate(vals):
+            have = [x for x in v if x is not None]
+            if ends:
+                rng = f"{xl_rowcol_to_cell(3 + i, 4)}:{xl_rowcol_to_cell(3 + i, 3 + len(ends))}"
+                ws.write_formula(3 + i, 3, f'=IFERROR(AVERAGE({rng}),"")', f_pct, round(sum(have) / len(have), 2) if have else "")
+        if rows and len(headers) > 3: ws.conditional_format(3, 3, 2 + len(rows), len(headers) - 1, HEAT)
+
+    if "vs_benchmark" in req.sheets:
+        headers = (["Fund / Index", "Type", "Category"]
+                   + [f"Excess CAGR {n}Y (%)" for n in periods] + [f"Correlation {n}Y" for n in periods]
+                   + [f"Tracking Error {n}Y (%)" for n in periods])
+        rows = [lead(it) + [res["excess"][str(n)][i] for n in periods] + [res["corr"][str(n)][i] for n in periods]
+                + [res["te"][str(n)][i] for n in periods] for i, it in enumerate(items)]
+        ws = make("Vs Benchmark", headers, rows, L3 + [f_pct] * P_ + [f_dec] * P_ + [f_dec] * P_)
+        if rows: ws.conditional_format(3, 3, 2 + len(rows), 2 + P_, HEAT)
+
+    if "rankings" in req.sheets:
+        order = sorted(range(N), key=lambda i: (not items[i]["is_benchmark"], res["median_rank"][i] is None, res["median_rank"][i] or 0))
+        headers = ["Fund / Index", "Type", "Category", "Median Rank", "Avg Rank 10Y", "Avg Rank 5Y", "Avg Rank 3Y"] + [str(y) for y in show_years]
+        rows = [lead(items[i]) + [res["median_rank"][i], res["avg_rank"]["10"][i], res["avg_rank"]["5"][i], res["avg_rank"]["3"][i]]
+                + [res["rank"][str(y)][i] for y in show_years] for i in order]
+        ws = make("Rankings", headers, rows, L3 + [f_flt, f_int, f_int, f_int] + [f_int] * len(show_years))
+        if rows and show_years: ws.conditional_format(3, 7, 2 + len(rows), len(headers) - 1, RANKHEAT)
+
+    wb.close()
+    out.seek(0)
+    return StreamingResponse(
+        out,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=MF_Analysis_{res['as_of']}.xlsx"},
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

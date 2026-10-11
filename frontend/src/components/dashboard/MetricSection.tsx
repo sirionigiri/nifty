@@ -1,3 +1,4 @@
+// frontend/src/components/dashboard/MetricSection.tsx
 "use client"
 
 import React, { useMemo, useEffect, useState } from "react"
