@@ -1732,18 +1732,77 @@ def compute_mf2(req: MF2Request):
         ROLL = (((num / den) ** (1.0 / 3)) - 1).replace([np.inf, -np.inf], np.nan) * 100
     roll_years = [y for y in roll_all if ROLL.loc[y].notna().any()]
 
-    # ── ranks (1 = best) among everything selected, + median / avg(10,5,3) ──
+    # ── ranks (1 = best) & percentiles (100 = best) among everything selected, + median / avg(10,5,3) ──
     rank, universe, median_rank, avg_rank = {}, {}, [None] * N, {"10": [None] * N, "5": [None] * N, "3": [None] * N}
-    if years:
-        CALy = CAL.loc[years]
-        RK = CALy.rank(axis=1, ascending=False, method="min")
-        universe = {str(y): int(CALy.loc[y].notna().sum()) for y in years}
-        rank = {str(y): _m2_int(RK.loc[y]) for y in years}
-        median_rank = _m2_lst(RK.median().where(RK.notna().sum() >= 3), 1)
-        for k in (10, 5, 3):
-            sub = RK.reindex(list(range(L, L - k, -1)))
-            full = sub.notna().sum() == k                      # need the complete window
-            avg_rank[str(k)] = _m2_int(np.floor(sub.mean().where(full) + 0.5))
+    percentile, median_percentile, avg_percentile = {}, [None] * N, {"10": [None] * N, "5": [None] * N, "3": [None] * N}
+    PCT_LIST = [99, 95, 90, 85, 80, 75, 70, 65, 60, 50, 40, 30, 25, 20, 15, 10, 5, 1]
+    pct_funds = {}  # { year: { "p99": "Fund Name (Return%)", ... } }
+
+    # Combine historical calendar years with YTD year if present
+    all_eval_years = list(years)
+    CAL_WITH_YTD = CAL.loc[years].copy() if years else pd.DataFrame(columns=keys, dtype=float)
+    if ytd_year is not None and ytd is not None:
+        all_eval_years = [ytd_year] + all_eval_years
+        CAL_WITH_YTD.loc[ytd_year] = ytd.to_numpy() if hasattr(ytd, "to_numpy") else ytd
+
+    if not CAL_WITH_YTD.empty:
+        RK = CAL_WITH_YTD.rank(axis=1, ascending=False, method="min")
+        universe = {str(y): int(CAL_WITH_YTD.loc[y].notna().sum()) for y in all_eval_years}
+        rank = {str(y): _m2_int(RK.loc[y]) for y in all_eval_years}
+
+        # Calculate percentile for each year: (U - rank) / (U - 1) * 100
+        PCT_DF = pd.DataFrame(index=all_eval_years, columns=keys, dtype=float)
+        for y in all_eval_years:
+            u = universe[str(y)]
+            if u > 1:
+                PCT_DF.loc[y] = ((u - RK.loc[y]) / (u - 1) * 100).round(1)
+            elif u == 1:
+                PCT_DF.loc[y] = RK.loc[y].apply(lambda r: 100.0 if pd.notna(r) else np.nan)
+            percentile[str(y)] = _m2_lst(PCT_DF.loc[y], 1)
+
+            # Compute p99, p95, ... funds for this year
+            row_vals = CAL_WITH_YTD.loc[y].dropna()
+            # Sort funds by return descending
+            sorted_funds = row_vals.sort_values(ascending=False)
+            u_funds = len(sorted_funds)
+            if u_funds > 0:
+                p_map = {}
+                for p in PCT_LIST:
+                    # Index in sorted_funds closest to target percentile p
+                    # p = (u_funds - 1 - idx) / (u_funds - 1) * 100
+                    idx = int(round((u_funds - 1) * (1.0 - p / 100.0)))
+                    idx = max(0, min(u_funds - 1, idx))
+                    k = sorted_funds.index[idx]
+                    ret_val = sorted_funds.iloc[idx]
+                    # Get display name
+                    if k.startswith("I:"):
+                        display_name = k[2:]
+                    else:
+                        m_name = meta.loc[int(k[2:])]["scheme_name"]
+                        display_name = str(m_name)
+                    p_map[f"p{p}"] = {
+                        "id": k,
+                        "name": display_name,
+                        "return": round(float(ret_val), 2),
+                    }
+                pct_funds[str(y)] = p_map
+            else:
+                pct_funds[str(y)] = {}
+
+        if years:
+            RKy = RK.loc[years]
+            median_rank = _m2_lst(RKy.median().where(RKy.notna().sum() >= 3), 1)
+            for k in (10, 5, 3):
+                sub = RKy.reindex(list(range(L, L - k, -1)))
+                full = sub.notna().sum() == k                      # need the complete window
+                avg_rank[str(k)] = _m2_int(np.floor(sub.mean().where(full) + 0.5))
+
+            PCTy = PCT_DF.loc[years]
+            median_percentile = _m2_lst(PCTy.median().where(PCTy.notna().sum() >= 3), 1)
+            for k in (10, 5, 3):
+                sub_p = PCTy.reindex(list(range(L, L - k, -1)))
+                full_p = sub_p.notna().sum() == k
+                avg_percentile[str(k)] = _m2_lst(sub_p.mean().where(full_p), 1)
 
     yd = sorted(years, reverse=True)
     return {
@@ -1754,7 +1813,10 @@ def compute_mf2(req: MF2Request):
         "ytd_year": ytd_year, "ytd": _m2_lst(ytd) if ytd is not None else None,
         "roll_years": sorted(roll_years, reverse=True),
         "roll3": {str(y): _m2_lst(ROLL.loc[y]) for y in roll_years},
-        "rank": {str(y): rank[str(y)] for y in yd} if years else {},
+        "rank": {str(y): rank[str(y)] for y in all_eval_years} if all_eval_years else {},
+        "percentile": {str(y): percentile[str(y)] for y in all_eval_years} if all_eval_years else {},
+        "median_percentile": median_percentile, "avg_percentile": avg_percentile,
+        "pct_funds": pct_funds,
         "universe": universe, "median_rank": median_rank, "avg_rank": avg_rank,
     }
 

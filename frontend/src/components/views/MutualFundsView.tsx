@@ -343,10 +343,17 @@ export function MutualFundsView() {
 
                 return (
                   <div key={catId} className="border border-slate-100 dark:border-slate-800 rounded-xl overflow-hidden">
-                    <button
-                      type="button"
+                    <div
+                      role="button"
+                      tabIndex={0}
                       onClick={() => setOpenCategory(isOpen ? null : catId)}
-                      className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/50"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault()
+                          setOpenCategory(isOpen ? null : catId)
+                        }
+                      }}
+                      className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer select-none"
                     >
                       <div className="flex items-center gap-2">
                         <Checkbox
@@ -358,7 +365,7 @@ export function MutualFundsView() {
                         <span className="text-xs font-bold text-slate-600 dark:text-slate-300">{cat.name}</span>
                       </div>
                       {isOpen ? <ChevronDown className="w-3 h-3 text-slate-400" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
-                    </button>
+                    </div>
 
                     {isOpen && (
                       <div className="px-3 pb-3 pt-1 space-y-2 bg-slate-50/50 dark:bg-slate-900/30">

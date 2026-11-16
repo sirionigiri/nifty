@@ -24,4 +24,7 @@ export type MF2Analysis = {
   roll_years: number[]; roll3: Record<string, Num[]>
   rank: Record<string, Num[]>; universe: Record<string, number>
   median_rank: Num[]; avg_rank: Record<string, Num[]>
+  percentile?: Record<string, Num[]>
+  median_percentile?: Num[]; avg_percentile?: Record<string, Num[]>
+  pct_funds?: Record<string, Record<string, { id: string; name: string; return: number }>>
 }

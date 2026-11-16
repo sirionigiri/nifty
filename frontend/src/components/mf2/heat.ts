@@ -24,5 +24,13 @@ export function rankHeat(rank: number | null | undefined, n: number | undefined)
   return { backgroundColor: `hsl(${130 - p * 130} 70% 48% / 0.4)` }
 }
 
+export function percentileHeat(pct: number | null | undefined): CSSProperties {
+  if (!isNum(pct)) return {}
+  // 100 = best (green, hue ~130), 0 = worst (red, hue ~0)
+  const clamped = Math.max(0, Math.min(100, pct))
+  const hue = (clamped / 100) * 130
+  return { backgroundColor: `hsl(${hue} 70% 48% / 0.35)` }
+}
+
 export const fmtDate = (iso: string) =>
   new Date(iso + "T00:00:00").toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })

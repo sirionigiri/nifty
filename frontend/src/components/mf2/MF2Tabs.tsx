@@ -5,7 +5,7 @@ import { MatrixTable, type Axis, type Cell } from "@/components/mf2/MatrixTable"
 import { BaseChart } from "@/components/charts/BaseChart"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { fmtDate, fmtNum, isNum, rankHeat, robustScale, signHeat, tone } from "@/components/mf2/heat"
+import { fmtDate, fmtNum, isNum, percentileHeat, rankHeat, robustScale, signHeat, tone } from "@/components/mf2/heat"
 import type { Coverage, MF2Analysis, MF2Item, Num } from "@/components/mf2/types"
 
 const axisOf = (it: MF2Item): Axis => ({
@@ -26,15 +26,15 @@ export function visibleYears(data: MF2Analysis, coverage: Coverage): number[] {
 
 /* ───────────────────────────── RETURNS ───────────────────────────── */
 export function ReturnsTab({ data }: { data: MF2Analysis }) {
-  const rows: Axis[] = data.periods.map(n => ({ key: String(n), label: `${n} Yr` }))
-  const cols = data.items.map(axisOf)
+  const rows = data.items.map(axisOf)
+  const cols: Axis[] = data.periods.map(n => ({ key: String(n), label: `${n} Yr` }))
   return (
     <MatrixTable
       title="CAGR — Annualised Returns (%)"
-      subtitle={`Trailing, ending ${fmtDate(data.as_of)} (latest complete month-end)`}
-      rowHeader="Period" colHeader="Fund / Index" rows={rows} cols={cols} flippable exportName="MF_CAGR_Returns"
+      subtitle={`Trailing, ending ${fmtDate(data.as_of)} (latest complete month-end) · Click any period header to sort`}
+      rowHeader="Fund / Index" colHeader="Period" rows={rows} cols={cols} flippable exportName="MF_CAGR_Returns"
       empty="Select at least one time period."
-      cell={(r, c) => numCell(data.cagr[rows[r].key]?.[c])}
+      cell={(r, c) => numCell(data.cagr[cols[c].key]?.[r])}
     />
   )
 }
@@ -127,8 +127,8 @@ export function RollingTab({ data, rollStart, setRollStart }: {
 
 /* ───────────────────────────── VS BENCHMARK ──────────────────────── */
 export function VsBenchTab({ data }: { data: MF2Analysis }) {
-  const rows: Axis[] = data.periods.map(n => ({ key: String(n), label: `${n} Yr` }))
-  const cols = data.items.map(axisOf)
+  const rows = data.items.map(axisOf)
+  const cols: Axis[] = data.periods.map(n => ({ key: String(n), label: `${n} Yr` }))
   const [period, setPeriod] = useState<number | null>(null)
   const [zoom, setZoom] = useState(false)
   const active = period && data.periods.includes(period) ? period : data.periods[0]
@@ -152,17 +152,17 @@ export function VsBenchTab({ data }: { data: MF2Analysis }) {
 
   return (
     <div className="space-y-6">
-      <MatrixTable title="Excess CAGR vs Benchmark (%)" subtitle={`Item CAGR minus ${data.benchmark} CAGR over the same period`}
-        rowHeader="Period" colHeader="Fund / Index" rows={rows} cols={cols} flippable exportName="MF_Excess_CAGR"
-        empty="Select at least one time period." cell={(r, c) => numCell(data.excess[rows[r].key]?.[c])} />
+      <MatrixTable title="Excess CAGR vs Benchmark (%)" subtitle={`Item CAGR minus ${data.benchmark} CAGR over the same period · Click any period header to sort`}
+        rowHeader="Fund / Index" colHeader="Period" rows={rows} cols={cols} flippable exportName="MF_Excess_CAGR"
+        empty="Select at least one time period." cell={(r, c) => numCell(data.excess[cols[c].key]?.[r])} />
 
-      <MatrixTable title="Correlation vs Benchmark" subtitle="Monthly returns over each period · item must span the full period"
-        rowHeader="Period" colHeader="Fund / Index" rows={rows} cols={cols} flippable exportName="MF_Correlation"
-        empty="Select at least one time period." cell={(r, c) => plainCell(data.corr[rows[r].key]?.[c])} />
+      <MatrixTable title="Correlation vs Benchmark" subtitle="Monthly returns over each period · item must span the full period · Click any period header to sort"
+        rowHeader="Fund / Index" colHeader="Period" rows={rows} cols={cols} flippable exportName="MF_Correlation"
+        empty="Select at least one time period." cell={(r, c) => plainCell(data.corr[cols[c].key]?.[r])} />
 
-      <MatrixTable title="Tracking Error (% annualised)" subtitle="Std-dev of monthly excess returns vs benchmark × √12 · lower = closer to the index"
-        rowHeader="Period" colHeader="Fund / Index" rows={rows} cols={cols} flippable exportName="MF_Tracking_Error"
-        empty="Select at least one time period." cell={(r, c) => plainCell(data.te[rows[r].key]?.[c])} />
+      <MatrixTable title="Tracking Error (% annualised)" subtitle="Std-dev of monthly excess returns vs benchmark × √12 · lower = closer to the index · Click any period header to sort"
+        rowHeader="Fund / Index" colHeader="Period" rows={rows} cols={cols} flippable exportName="MF_Tracking_Error"
+        empty="Select at least one time period." cell={(r, c) => plainCell(data.te[cols[c].key]?.[r])} />
 
       {active && (
         <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm">
@@ -269,5 +269,124 @@ export function RankingsTab({ data, coverage }: { data: MF2Analysis; coverage: C
         }}
       />
     </div>
+  )
+}
+
+/* ─────────────────────────── PERCENTILE RANKING ──────────────────── */
+type PctSortKey = "median" | "a10" | "a5" | "a3" | "name"
+
+export function PercentileRankingTab({ data, coverage }: { data: MF2Analysis; coverage: Coverage }) {
+  const [sort, setSort] = useState<PctSortKey>("median")
+  const years = useMemo(() => visibleYears(data, coverage), [data, coverage])
+  const evalYears = useMemo(
+    () => [...(data.ytd_year ? [data.ytd_year] : []), ...years],
+    [years, data.ytd_year],
+  )
+
+  const order = useMemo(() => {
+    const key = (i: number): Num =>
+      sort === "median" ? data.median_percentile?.[i] ?? null
+      : sort === "a10" ? data.avg_percentile?.["10"]?.[i] ?? null
+      : sort === "a5" ? data.avg_percentile?.["5"]?.[i] ?? null
+      : data.avg_percentile?.["3"]?.[i] ?? null
+    return data.items.map((_, i) => i).sort((a, b) => {
+      const A = data.items[a], B = data.items[b]
+      if (A.is_benchmark !== B.is_benchmark) return A.is_benchmark ? -1 : 1
+      if (sort === "name") return A.name.localeCompare(B.name)
+      const x = key(a), y = key(b)
+      if (x == null && y == null) return 0
+      if (x == null) return 1
+      if (y == null) return -1
+      return y - x // higher percentile is better, so desc order
+    })
+  }, [data, sort])
+
+  const rows = useMemo(() => order.map(i => axisOf(data.items[i])), [order, data])
+  const cols: Axis[] = useMemo(() => [
+    { key: "median", label: "Median %ile" }, { key: "avg10", label: "Avg %ile 10Y" },
+    { key: "avg5", label: "Avg %ile 5Y" }, { key: "avg3", label: "Avg %ile 3Y" },
+    ...evalYears.map(y => ({
+      key: String(y),
+      label: y === data.ytd_year ? `${y} YTD` : String(y),
+    })),
+  ], [evalYears, data.ytd_year])
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Sort by</span>
+        <Select value={sort} onValueChange={v => setSort(v as PctSortKey)}>
+          <SelectTrigger className="w-52 h-9 rounded-xl text-xs font-bold"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="median" className="text-xs font-bold">Median percentile</SelectItem>
+            <SelectItem value="a10" className="text-xs font-bold">Avg percentile 10Y</SelectItem>
+            <SelectItem value="a5" className="text-xs font-bold">Avg percentile 5Y</SelectItem>
+            <SelectItem value="a3" className="text-xs font-bold">Avg percentile 3Y</SelectItem>
+            <SelectItem value="name" className="text-xs font-bold">Name</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <MatrixTable
+        title="Calendar Year Percentile Rankings (100% = top performer)"
+        subtitle="Percentile score relative to all selected funds/indices for each calendar year and YTD · Click any header to sort"
+        rowHeader="Fund / Index" colHeader="Metric" rows={rows} cols={cols} exportName="MF_Percentile_Rankings" flippable
+        cell={(r, c) => {
+          const col = cols[c], i = order[r]
+          if (col.key === "median") {
+            const v = data.median_percentile?.[i]
+            return { value: v ?? null, text: isNum(v) ? `${fmtNum(v, 1)}%` : "—", className: "font-bold" }
+          }
+          if (col.key.startsWith("avg")) {
+            const v = data.avg_percentile?.[col.key.slice(3)]?.[i]
+            return { value: v ?? null, text: isNum(v) ? `${fmtNum(v, 1)}%` : "—", className: "font-bold" }
+          }
+          const v = data.percentile?.[col.key]?.[i]
+          return { value: v ?? null, text: isNum(v) ? `${fmtNum(v, 1)}%` : "—", style: percentileHeat(v) }
+        }}
+      />
+    </div>
+  )
+}
+
+/* ─────────────────────────── PERCENTILE TIERS ────────────────────── */
+const PCT_TIERS = [99, 95, 90, 85, 80, 75, 70, 65, 60, 50, 40, 30, 25, 20, 15, 10, 5, 1]
+
+export function PercentileTiersTab({ data, coverage }: { data: MF2Analysis; coverage: Coverage }) {
+  const years = useMemo(() => visibleYears(data, coverage), [data, coverage])
+  const evalYears = useMemo(
+    () => [...(data.ytd_year ? [data.ytd_year] : []), ...years],
+    [years, data.ytd_year],
+  )
+
+  const rows: Axis[] = useMemo(() => PCT_TIERS.map(p => ({
+    key: `p${p}`,
+    label: `p${p}`,
+    sub: `${p}th Percentile`,
+  })), [])
+
+  const cols: Axis[] = useMemo(() => evalYears.map(y => ({
+    key: String(y),
+    label: y === data.ytd_year ? `${y} YTD` : String(y),
+  })), [evalYears, data.ytd_year])
+
+  return (
+    <MatrixTable
+      title="Mutual Funds by Percentile Tier (p99 → p1)"
+      subtitle="Scheme matching or closest to each target percentile tier every calendar year and YTD · Click Flip or headers to adjust view"
+      rowHeader="Percentile Tier" colHeader="Year" rows={rows} cols={cols} exportName="MF_Percentile_Tiers" flippable
+      cell={(r, c) => {
+        const tierKey = rows[r].key
+        const yearKey = cols[c].key
+        const item = data.pct_funds?.[yearKey]?.[tierKey]
+        if (!item) return { text: "—", value: null }
+        const pNum = Number(tierKey.slice(1))
+        return {
+          text: `${item.name} (${item.return > 0 ? "+" : ""}${fmtNum(item.return, 1)}%)`,
+          value: item.return,
+          style: percentileHeat(pNum),
+          className: "text-[11px] font-medium leading-tight px-2 py-1.5",
+        }
+      }}
+    />
   )
 }

@@ -9,17 +9,19 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ALL_PERIODS, MF2Sidebar } from "@/components/mf2/MF2Sidebar"
 import { MF2Report } from "@/components/mf2/MF2Report"
-import { CalendarTab, RankingsTab, ReturnsTab, RollingTab, VsBenchTab } from "@/components/mf2/MF2Tabs"
+import { CalendarTab, PercentileRankingTab, PercentileTiersTab, RankingsTab, ReturnsTab, RollingTab, VsBenchTab } from "@/components/mf2/MF2Tabs"
 import { fmtDate } from "@/components/mf2/heat"
 import type { Coverage, MF2Analysis, MF2Config } from "@/components/mf2/types"
 
-type SubTab = "returns" | "calendar" | "rolling" | "vs" | "ranks"
+type SubTab = "returns" | "calendar" | "rolling" | "vs" | "ranks" | "percentile" | "tiers"
 const SUBTABS: { id: SubTab; label: string }[] = [
   { id: "returns", label: "Returns" },
   { id: "calendar", label: "Calendar Year Returns" },
   { id: "rolling", label: "3Yr Rolling" },
   { id: "vs", label: "Vs Benchmark" },
   { id: "ranks", label: "Rankings" },
+  { id: "percentile", label: "Percentile Ranking" },
+  { id: "tiers", label: "Percentile Tiers (p99–p1)" },
 ]
 
 function useDebounced<T>(value: T, ms: number): T {
@@ -99,16 +101,17 @@ export function MF2View() {
     <div className="grid grid-cols-1 lg:grid-cols-4 gap-8 pb-20">
       <div className="lg:col-span-1 lg:sticky lg:top-4 lg:self-start">
         <MF2Sidebar
-                  cfg={cfg}
-                  selClasses={selClasses} onClasses={s => setDeselClasses(new Set(allClasses.filter(c => !s.has(c))))}
-                  fundOptions={fundOptions} selFunds={selFunds} onFunds={setSelFunds}
-                  selIndices={selIndices} onIndices={setSelIndices}
-                  selPeriods={selPeriods} onPeriods={setSelPeriods}
-                  benchmark={benchmark} onBenchmark={setBenchmark}
-                  reportSlot={<MF2Report fundCodes={fundCodes} indices={indices} benchmark={benchmark} periods={periods}
-                      rollStart={rollStart} referenceDate={referenceDate} minMonths={minMonths} />} minMonths={0} onMinMonths={function (m: number): void {
-                          throw new Error("Function not implemented.")
-                      } }        />
+          cfg={cfg}
+          selClasses={selClasses} onClasses={s => setDeselClasses(new Set(allClasses.filter(c => !s.has(c))))}
+          fundOptions={fundOptions} selFunds={selFunds} onFunds={setSelFunds}
+          selIndices={selIndices} onIndices={setSelIndices}
+          selPeriods={selPeriods} onPeriods={setSelPeriods}
+          benchmark={benchmark} onBenchmark={setBenchmark}
+          minMonths={minMonths} onMinMonths={setMinMonths}
+          hidden={cfg?.hidden}
+          reportSlot={<MF2Report fundCodes={fundCodes} indices={indices} benchmark={benchmark} periods={periods}
+              rollStart={rollStart} referenceDate={referenceDate} minMonths={minMonths} />}
+        />
       </div>
 
       <div className="lg:col-span-3 min-w-0 space-y-6">
@@ -125,7 +128,7 @@ export function MF2View() {
           </Tabs>
 
           <div className="flex items-center gap-4">
-            {(sub === "calendar" || sub === "ranks") && (
+            {(sub === "calendar" || sub === "ranks" || sub === "percentile" || sub === "tiers") && (
               <div className="flex items-center gap-2">
                 <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Years with data for</span>
                 <Select value={coverage} onValueChange={v => setCoverage(v as Coverage)}>
@@ -159,6 +162,8 @@ export function MF2View() {
             {sub === "rolling" && <RollingTab data={data} rollStart={rollStart} setRollStart={setRollStart} />}
             {sub === "vs" && <VsBenchTab data={data} />}
             {sub === "ranks" && <RankingsTab data={data} coverage={coverage} />}
+            {sub === "percentile" && <PercentileRankingTab data={data} coverage={coverage} />}
+            {sub === "tiers" && <PercentileTiersTab data={data} coverage={coverage} />}
           </>
         )}
       </div>
